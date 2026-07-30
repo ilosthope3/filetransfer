@@ -4,70 +4,29 @@ import (
 	"fmt"
 	"net/http"
 	// "html/template"
-	"strings"
+	// "strings"
 	"os"
 	"io"
 	"path/filepath"
 	"time"
 	"encoding/json"
-	"embed"
-  "html/template"
+	// "embed"
+  // "html/template"
 )
+
+
+
+type Config struct {
+    TokensFile string
+    SaveDir    string
+}
 
 const MAINPASSWORD = "123"
 
-//go:embed web/index.html
-var indexHTML string
+var appConfig Config
 
 
 
-func mainPage(w http.ResponseWriter, r *http.Request) {
-	
-	successMsg := func(s string) string {
-		if strings.ToLower(s) == "true" {
-			return `<p style="color:green; font-weight:bold;">Upload successful</p>`
-		}
-		if strings.ToLower(s) == "false" { return `<p style="color:red; font-weight:bold;">Upload failed</p>`}
-		return ""
-	}
-
-	getNames := func() string {
-		r:= ""
-
-		tokensFile := "devices.json"
-		data, _ := os.ReadFile(tokensFile)
-		tokensMap := make(map[string]string)
-		json.Unmarshal(data, &tokensMap)
-
-		for i := range tokensMap {
-			r += fmt.Sprintf(`<option value="%s">%s</option>`, tokensMap[i], tokensMap[i])
-		}
-
-		if (r!= "") {
-			r = `<select name="receiver">` + r + `</select>`
-		}
-		return r
-	}
-	
-	var htmlData struct {
-		Success := successMsg(r.URL.Query().Get("success"))
-		DevicesNames := getNames()
-	}
-
-	temp, err := template.New("index").Parse(indexHTML)
-	if err != nil {
-		http.Error("error parsing mainpage", http.StatusInternalServerError)
-		return
-	}
-
-	data := struct {
-		SuccessMsg   template.HTML
-		DeviceNames template.HTML
-	}{
-		SuccessMsg:   template.HTML(successMsg(r.URL.Query().Get("success"))),   // Mark as safe HTML
-		DeviceOptions: template.HTML(getNames()), // Mark as safe HTML
-	}
-}
 
 func handleAuth(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("handling auth")
@@ -79,8 +38,8 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	tokensFile := "devices.json"
-	data, err := os.ReadFile(tokensFile)
+	
+	data, err := os.ReadFile(appConfig.TokensFile)
 	tokensMap := make(map[string]string)
 	json.Unmarshal(data, &tokensMap)
 
@@ -115,11 +74,11 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	token := fmt.Sprintf("token-%d", time.Now().UnixNano())
 
 	
-	tokensFile := "devices.json"
+	
 	tokensMap := make(map[string]string)
 
 	
-	data, err := os.ReadFile(tokensFile)
+	data, err := os.ReadFile(appConfig.TokensFile)
 	if err == nil {
 		// If file exists, unmarshal it
 		json.Unmarshal(data, &tokensMap)
@@ -127,7 +86,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	
 	tokensMap[token] = req.Name
 	newData, _ := json.MarshalIndent(tokensMap, "", "  ")
-	os.WriteFile(tokensFile, newData, 0644)
+	os.WriteFile(appConfig.TokensFile, newData, 0644)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
@@ -152,16 +111,14 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			receiver = "default"
 		}
 
-    saveDir := filepath.Join("uploads", receiver) 
+    receiverPath := filepath.Join(appConfig.SaveDir, receiver) 
 
-    if err := os.MkdirAll(saveDir, os.ModePerm); err != nil {
+    if err := os.MkdirAll(receiverPath, os.ModePerm); err != nil {
         redirectError("Could not create uploads folder")
         return
     }
 
-		
-
-    files := r.MultipartForm.File["file"] // This is a slice now
+    files := r.MultipartForm.File["file"] 
 
     if len(files) == 0 && len(link) == 0{
         redirectError("No files provided")
@@ -169,7 +126,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
     }
 
 		if link!= "" {
-			linkFileP := filepath.Join(saveDir, "links.md")
+			linkFileP := filepath.Join(receiverPath, "links.md")
 
 			existing, _ := os.ReadFile(linkFileP)
 			
@@ -195,11 +152,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
         }
         defer file.Close()
 
-        // Sanitize filename
         filename := filepath.Base(fileHeader.Filename)
 
-        // Create the destination file on disk
-        dst, err := os.Create(filepath.Join(saveDir, filename))
+        dst, err := os.Create(filepath.Join(receiverPath, filename))
         if err != nil {
             redirectError("Failed to create file: " + filename)
             return
@@ -216,12 +171,42 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
     http.Redirect(w, r, "/?success=true", http.StatusSeeOther)
 }
 
+func getDataDir() string {
+	exe, err := os.Executable()
+	if err != nil {
+			return "./data" 
+	}
+	dir := filepath.Dir(exe) 
+	return filepath.Join(dir, "data")
+}
+
+
+func devInit() {
+		if err := os.RemoveAll(appConfig.SaveDir); err != nil {
+			fmt.Println("deverr1: %v",err)
+    }
+    if err := os.MkdirAll(appConfig.SaveDir, os.ModePerm); err != nil {
+			fmt.Println("deverr2: %v",err)
+    }
+    if err := os.WriteFile(appConfig.TokensFile, []byte("{}\n"), 0644); err != nil {
+			fmt.Println("deverr3: %v",err)
+    }
+		fmt.Println("files reset")
+}
+
 func main() {
-	os.MkdirAll("./uploads", os.ModePerm)
-	http.HandleFunc("/", mainPage)
+
+	dataDir := getDataDir()
+	appConfig.TokensFile = filepath.Join(dataDir, "devices.json")
+	appConfig.SaveDir = filepath.Join(dataDir, "uploads")
+	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
+	
+	devInit()
+
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)
 	http.HandleFunc("/whoami", handleAuth)
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
+	
 }

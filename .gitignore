@@ -1,0 +1,98 @@
+# =====================================
+# GO (Backend)
+# =====================================
+# Compiled binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Your compiled binary (if you build locally)
+mytransfer
+server
+cmd/server/server
+cmd/client/client
+
+# Dependency directories (Go modules)
+vendor/
+
+# Go workspace file
+go.work
+go.work.sum
+
+# =====================================
+# VUE / NODE (Frontend)
+# =====================================
+# Node modules (huge, never commit)
+node_modules/
+web/node_modules/
+
+# Build output
+dist/
+web/dist/
+dist-ssr/
+web/dist-ssr/
+*.tsbuildinfo
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Local environment files (secrets)
+.env
+.env.local
+.env.*.local
+*.local
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Editor directories
+.vscode/
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Cache / temp
+.eslintcache
+__screenshots__/
+*.timestamp-*-*.mjs
+coverage/
+
+# Cypress / Vitest
+/cypress/videos/
+/cypress/screenshots/
+
+# =====================================
+# APPLICATION DATA (NEVER COMMIT)
+# =====================================
+# User uploads and device database
+data/uploads/
+data/devices.json
+data/tokens.json
+
+# =====================================
+# MISC
+# =====================================
+# If you use Tailscale or VPN configs
+*.conf
+
+# Backup files
+*.bak
+*~
+
+
+TODO.txt
