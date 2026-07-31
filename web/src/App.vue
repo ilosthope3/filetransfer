@@ -15,10 +15,9 @@
           <input type="text" v-model="link" placeholder="Paste a link here..."/>
           
         
-          <select v-model="receiver">
-            <option value="Laptop">Laptop</option>
-            <option value="Phone">Phone</option>
-            <option value="PC">PC</option>
+          <select v-if="deviceNames.length > 0" v-model="receiver">
+            <option disabled value="">Select a device</option>
+            <option v-for="i in deviceNames" :key="i" :value="i">{{ i }}</option>
           </select>
           
           <button type="submit">Upload</button>
@@ -50,18 +49,22 @@ const password = ref('')
 const token = ref(localStorage.getItem('device_token') || '')
 const files = ref([])
 const link = ref('')
-const receiver = ref('Laptop')
+const receiver = ref('')
 const message = ref('')
-const messageType = ref('success') 
+const messageType = ref('success')
+const deviceNames = ref([])
 
 const fileInput = ref(null)
 const selectedFiles = ref([])
+
+/////////////////////////////////////////////////////////////////////////////////
 
 const handleFileChange = () => {
   selectedFiles.value = fileInput.value.files
 }
 
-// --- Authentication ---
+/////////////////////////////////////////////////////////////////////////////////
+
 const login = async () => {
   try {
     const res = await fetch('/api/auth', {
@@ -85,31 +88,6 @@ const login = async () => {
   }
 }
 
-// --- Check token on startup ---
-onMounted(async () => {
-  if (token.value) {
-    try {
-      const res = await fetch('/api/whoami', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ Token: token.value })
-      })
-      if (res.ok) {
-        isLoggedIn.value = true
-      } else {
-        localStorage.removeItem('device_token')
-        token.value = ''
-        isLoggedIn.value = false
-      }
-    } catch {
-      localStorage.removeItem('device_token')
-      token.value = ''
-      isLoggedIn.value = false
-    }
-  }
-})
-
-// --- Fetch Files ---
 const fetchFiles = async () => {
   try {
     const res = await fetch('/api/list', {
@@ -158,6 +136,48 @@ const handleUpload = async () => {
     messageType.value = 'error'
   }
 }
+
+const fetchNames = async () => {
+  try {
+    const res = await fetch('/api/devices', {
+      headers: { 'Authorization': `Bearer ${token.value}` }
+    })
+    if (res.ok) {
+      const data = await res.json()
+      deviceNames.value = data.data
+    }
+  } catch (err) {
+    console.error('Failed to fetch device names', err)
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////////
+
+onMounted(async () => {
+  if (token.value) {
+    try {
+      const res = await fetch('/api/whoami', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ Token: token.value })
+      })
+      if (res.ok) {
+        isLoggedIn.value = true
+        fetchNames()
+
+      } else {
+        localStorage.removeItem('device_token')
+        token.value = ''
+        isLoggedIn.value = false
+      }
+    } catch {
+      localStorage.removeItem('device_token')
+      token.value = ''
+      isLoggedIn.value = false
+    }
+  }
+})
+
 </script>
 
 <style scoped>

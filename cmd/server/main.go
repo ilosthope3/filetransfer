@@ -3,30 +3,96 @@ package main
 import (
 	"fmt"
 	"net/http"
-	// "html/template"
-	// "strings"
 	"os"
 	"io"
 	"path/filepath"
 	"time"
 	"encoding/json"
-	// "embed"
-  // "html/template"
+	"errors"
+	"strings"
 )
-
-
-
-type Config struct {
-    TokensFile string
-    SaveDir    string
-}
 
 const MAINPASSWORD = "123"
 
-var appConfig Config
+type (
+	Config struct {
+    TokensFile string
+    SaveDir    string
+		MaxFormSize int64
+	}
+	APIResponse struct {
+    Success bool        `json:"success"`
+    Data    interface{} `json:"data,omitempty"`
+    Error   string      `json:"error,omitempty"`
+	}
+)
 
+var (
+	appConfig Config
+	tokenMap map[string]string
+)
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
+func sendJSON(w http.ResponseWriter,success bool, code int, msg interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+
+	resp := APIResponse{Success: success}
+	if success {
+		resp.Data = msg
+	} else {
+			
+		if errMsg, ok := msg.(string); ok {
+			resp.Error = errMsg
+		} else {
+			resp.Error = "unknown error"
+		}
+	}
+	json.NewEncoder(w).Encode(resp)
+}
+
+func authenticate(r *http.Request) (string, error) {
+    authHeader := r.Header.Get("Authorization")
+    if authHeader == "" {
+        return "", errors.New("missing Authorization header")
+    }
+
+    parts := strings.Split(authHeader, " ")
+    if len(parts) != 2 || parts[0] != "Bearer" {
+        return "", errors.New("invalid Authorization format")
+    }
+    token := parts[1]
+
+    deviceName, ok := tokenMap[token]
+    if !ok {
+        return "", errors.New("invalid token")
+    }
+    return deviceName, nil
+}
+
+func devInit() {
+		if err := os.RemoveAll(appConfig.SaveDir); err != nil {
+			fmt.Println("deverr1: %v",err)
+    }
+    if err := os.MkdirAll(appConfig.SaveDir, os.ModePerm); err != nil {
+			fmt.Println("deverr2: %v",err)
+    }
+    if err := os.WriteFile(appConfig.TokensFile, []byte("{}\n"), 0644); err != nil {
+			fmt.Println("deverr3: %v",err)
+    }
+		fmt.Println("files reset")
+}
+
+func mainInit() {
+	data, err := os.ReadFile(appConfig.TokensFile)
+	tokenMap = make(map[string]string)
+	if err == nil {
+		json.Unmarshal(data, &tokenMap)
+	}
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func handleAuth(w http.ResponseWriter, r *http.Request) {
 	fmt.Println("handling auth")
@@ -38,12 +104,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	
-	data, err := os.ReadFile(appConfig.TokensFile)
-	tokensMap := make(map[string]string)
-	json.Unmarshal(data, &tokensMap)
-
-	_, ok := tokensMap[req.Token]
+	_, ok := tokenMap[req.Token]
 	if (ok) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]string{"success": "true"})
@@ -72,20 +133,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	} 
 
 	token := fmt.Sprintf("token-%d", time.Now().UnixNano())
-
 	
-	
-	tokensMap := make(map[string]string)
-
-	
-	data, err := os.ReadFile(appConfig.TokensFile)
-	if err == nil {
-		// If file exists, unmarshal it
-		json.Unmarshal(data, &tokensMap)
-	}
-	
-	tokensMap[token] = req.Name
-	newData, _ := json.MarshalIndent(tokensMap, "", "  ")
+	tokenMap[token] = req.Name
+	newData, _ := json.MarshalIndent(tokenMap, "", "  ")
 	os.WriteFile(appConfig.TokensFile, newData, 0644)
 
 	w.Header().Set("Content-Type", "application/json")
@@ -93,119 +143,121 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
+	_, err := authenticate(r)
+	if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
+    return
+	}
 
+	err = r.ParseMultipartForm(appConfig.MaxFormSize)
+	if err != nil {
+		sendJSON(w, false, http.StatusBadRequest, "Files too large")
+		return
+	}
 
-    redirectError := func(msg string) {
-        fmt.Printf("ERROR: %s\n", msg)
-        http.Redirect(w, r, "/?success=false", http.StatusSeeOther)
-    }
+	link := r.FormValue("text")
+	receiver := filepath.Base(r.FormValue("receiver"))
+
+	if receiver == "" || receiver == "." || receiver == ".." {
+    sendJSON(w, false, http.StatusBadRequest, "Invalid receiver")
+    return
+	}
+
+	receiverPath := filepath.Join(appConfig.SaveDir, receiver) 
+
+	if err := os.MkdirAll(receiverPath, os.ModePerm); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "Failed to make upload path")		
+		return
+	}
+
+	files := r.MultipartForm.File["file"] 
+
+	if len(files) == 0 && len(link) == 0{
+		sendJSON(w, false, http.StatusBadRequest, "No files selected")
+		return
+	}
+
+	if link!= "" {
+		linkFileP := filepath.Join(receiverPath, "links.md")
+
+		existing, _ := os.ReadFile(linkFileP)
 		
-    err := r.ParseMultipartForm(50 << 20)
-    if err != nil {
-        redirectError("Form too large or invalid")
-        return
-    }
-		link := r.FormValue("text")
-    receiver := r.FormValue("receiver")
-		if receiver == "" {
-			receiver = "default"
+		timestamp := time.Now().Format("2006-01-02 15:04")
+		
+		new := fmt.Sprintf("[%s] <%s>\n", timestamp, link) 
+		content := []byte(new + string(existing))
+		
+		err:= os.WriteFile(linkFileP, content, 0644)
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to write to link file")
+			return
 		}
+		
+		fmt.Printf("LINK SAVED: %s\n", link)
+	}
 
-    receiverPath := filepath.Join(appConfig.SaveDir, receiver) 
-
-    if err := os.MkdirAll(receiverPath, os.ModePerm); err != nil {
-        redirectError("Could not create uploads folder")
-        return
-    }
-
-    files := r.MultipartForm.File["file"] 
-
-    if len(files) == 0 && len(link) == 0{
-        redirectError("No files provided")
-        return
-    }
-
-		if link!= "" {
-			linkFileP := filepath.Join(receiverPath, "links.md")
-
-			existing, _ := os.ReadFile(linkFileP)
-			
-			timestamp := time.Now().Format("2006-01-02 15:04")
-			
-			new := fmt.Sprintf("[%s] <%s>\n", timestamp, link) 
-			content := []byte(new + string(existing))
-			
-			err:= os.WriteFile(linkFileP, content, 0644)
+	for _, fileHeader := range files {
+			file, err := fileHeader.Open()
 			if err != nil {
-				redirectError("failed write")
+				sendJSON(w, false, http.StatusInternalServerError, "Failed to open file")
 				return
 			}
-			
-			fmt.Printf("LINK SAVED: %s\n", link)
-		}
+			defer file.Close()
 
-    for _, fileHeader := range files {
-        file, err := fileHeader.Open()
-        if err != nil {
-            redirectError("Failed to open uploaded file")
-            return
-        }
-        defer file.Close()
+			filename := filepath.Base(fileHeader.Filename)
 
-        filename := filepath.Base(fileHeader.Filename)
+			dst, err := os.Create(filepath.Join(receiverPath, filename))
+			if err != nil {
+					sendJSON(w, false, http.StatusInternalServerError, "Failed to create filepath")
+					return
+			}
+			defer dst.Close()
 
-        dst, err := os.Create(filepath.Join(receiverPath, filename))
-        if err != nil {
-            redirectError("Failed to create file: " + filename)
-            return
-        }
-        defer dst.Close()
-
-        _, err = io.Copy(dst, file)
-        if err != nil {
-            redirectError("Failed to save file: " + filename)
-            return
-        }
-    }
-
-    http.Redirect(w, r, "/?success=true", http.StatusSeeOther)
-}
-
-func getDataDir() string {
-	exe, err := os.Executable()
-	if err != nil {
-			return "./data" 
+			_, err = io.Copy(dst, file)
+			if err != nil {
+					sendJSON(w, false, http.StatusInternalServerError, "Failed to copy file")
+					return
+			}
 	}
-	dir := filepath.Dir(exe) 
-	return filepath.Join(dir, "data")
+
+	sendJSON(w, true, http.StatusOK, "Upload success")
 }
 
+func getDeviceNames(w http.ResponseWriter, r *http.Request) {
+	deviceName, err := authenticate(r)
+	if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
+    return
+	}
 
-func devInit() {
-		if err := os.RemoveAll(appConfig.SaveDir); err != nil {
-			fmt.Println("deverr1: %v",err)
-    }
-    if err := os.MkdirAll(appConfig.SaveDir, os.ModePerm); err != nil {
-			fmt.Println("deverr2: %v",err)
-    }
-    if err := os.WriteFile(appConfig.TokensFile, []byte("{}\n"), 0644); err != nil {
-			fmt.Println("deverr3: %v",err)
-    }
-		fmt.Println("files reset")
+	n := make([]string, 0 ,len(tokenMap))
+	for _, name := range tokenMap {
+		if name != deviceName{
+			n = append(n, name)
+		}
+		
+	}
+
+	sendJSON(w, true, http.StatusOK, n)
 }
+
+///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
 
-	dataDir := getDataDir()
-	appConfig.TokensFile = filepath.Join(dataDir, "devices.json")
-	appConfig.SaveDir = filepath.Join(dataDir, "uploads")
+	appConfig.MaxFormSize = 50 << 20 
+	appConfig.TokensFile = "../../data/devices.json"
+	appConfig.SaveDir = "../../data/uploads"
 	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
 	
 	devInit()
+	mainInit()
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)
 	http.HandleFunc("/whoami", handleAuth)
+	http.HandleFunc("/devices", getDeviceNames)
+
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
 	
