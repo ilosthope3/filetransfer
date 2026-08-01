@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"github.com/google/uuid"
 )
 
 const MAINPASSWORD = "123"
@@ -24,6 +25,20 @@ type (
     Success bool        `json:"success"`
     Data    interface{} `json:"data,omitempty"`
     Error   string      `json:"error,omitempty"`
+	}
+	FileMeta struct {
+		ID   string			`json:"id"`
+		Size int64			`json:"size,omitempty"`
+		Time string			`json:"timestamp,omitempty"`
+		Name string			`json:"filename,omitempty"`
+		Sender string		`json:"sender,omitempty"`
+
+	}
+	LinkMeta struct {
+		ID   string			`json:"id"`
+		Time string			`json:"timestamp,omitempty"`
+		Url string			`json:"url,omitempty"`
+		Sender string		`json:"sender,omitempty"`
 	}
 )
 
@@ -143,7 +158,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	_, err := authenticate(r)
+	senderName, err := authenticate(r)
 	if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
     return
@@ -164,32 +179,48 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	receiverPath := filepath.Join(appConfig.SaveDir, receiver) 
-
 	if err := os.MkdirAll(receiverPath, os.ModePerm); err != nil {
 		sendJSON(w, false, http.StatusInternalServerError, "Failed to make upload path")		
 		return
 	}
 
 	files := r.MultipartForm.File["file"] 
-
 	if len(files) == 0 && len(link) == 0{
 		sendJSON(w, false, http.StatusBadRequest, "No files selected")
 		return
 	}
 
 	if link!= "" {
-		linkFileP := filepath.Join(receiverPath, "links.md")
 
-		existing, _ := os.ReadFile(linkFileP)
+		var linkData LinkMeta
+		linkData.Time = time.Now().Format("2006-01-02 15:04")
+		linkData.Sender = senderName
+		linkData.Url = link
+		linkData.ID = uuid.New().String()
+
+
+		var existing []LinkMeta
+
+		linkFileP := filepath.Join(receiverPath, "links.json")
+		data, err := os.ReadFile(linkFileP)
+		if err == nil {
+			if err := json.Unmarshal(data, &existing); err != nil {
+				existing = []LinkMeta{}
+			}
+		} else {
+				
+			existing = []LinkMeta{}
+		}
+		existing = append([]LinkMeta{linkData}, existing...)
 		
-		timestamp := time.Now().Format("2006-01-02 15:04")
-		
-		new := fmt.Sprintf("[%s] <%s>\n", timestamp, link) 
-		content := []byte(new + string(existing))
-		
-		err:= os.WriteFile(linkFileP, content, 0644)
+		newData, err := json.MarshalIndent(existing, "", "  ")
 		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "Failed to write to link file")
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to encode links")
+			return
+		}
+
+		if err := os.WriteFile(linkFileP, newData, 0644); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to write link file")
 			return
 		}
 		
@@ -197,29 +228,78 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, fileHeader := range files {
-			file, err := fileHeader.Open()
-			if err != nil {
-				sendJSON(w, false, http.StatusInternalServerError, "Failed to open file")
-				return
-			}
-			defer file.Close()
 
-			filename := filepath.Base(fileHeader.Filename)
+		
 
-			dst, err := os.Create(filepath.Join(receiverPath, filename))
-			if err != nil {
-					sendJSON(w, false, http.StatusInternalServerError, "Failed to create filepath")
-					return
-			}
-			defer dst.Close()
+		file, err := fileHeader.Open()
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to open file")
+			return
+		}
+		defer file.Close()
 
-			_, err = io.Copy(dst, file)
-			if err != nil {
-					sendJSON(w, false, http.StatusInternalServerError, "Failed to copy file")
-					return
+		filename := filepath.Base(fileHeader.Filename)
+
+		var metadata FileMeta
+		metadata.Name = filename
+		metadata.Time = time.Now().Format("2006-01-02 15:04")
+		metadata.Sender = senderName
+		metadata.Size = fileHeader.Size
+		metadata.ID = uuid.New().String()
+
+		dst, err := os.Create(filepath.Join(receiverPath, metadata.ID))
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to create filepath")
+			return
+		}
+		defer dst.Close()
+
+
+		_, err = io.Copy(dst, file)
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to copy file")
+			return
+		}
+
+		
+		var existing []FileMeta
+
+		fileFileP := filepath.Join(receiverPath, "files.json")
+		data, err := os.ReadFile(fileFileP)
+		if err == nil {
+			if err := json.Unmarshal(data, &existing); err != nil {
+				existing = []FileMeta{}
 			}
+		} else {
+			existing = []FileMeta{}
+		}
+		existing = append([]FileMeta{metadata}, existing...)
+		
+		newData, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to encode file meta")
+			return
+		}
+
+		if err := os.WriteFile(fileFileP, newData, 0644); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to write files file")
+			return
+		}
+			
+		// metaFile, err := os.Create(filepath.Join(receiverPath, metadata.ID + ".meta.json"))
+		// if err != nil {
+		// 	sendJSON(w, false, http.StatusInternalServerError, "Failed to create meta file")
+		// 	return
+		// }
+		// defer metaFile.Close()
+
+		// encoder := json.NewEncoder(metaFile)
+		// encoder.SetIndent("", "  ") // Makes the JSON human-readable
+		// if err := encoder.Encode(metadata); err != nil {
+		// 	sendJSON(w, false, http.StatusInternalServerError, "Failed to write metadata")
+		// 	return
+		// }
 	}
-
 	sendJSON(w, true, http.StatusOK, "Upload success")
 }
 
@@ -241,22 +321,48 @@ func getDeviceNames(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, true, http.StatusOK, n)
 }
 
+func handleFileList(w http.ResponseWriter, r *http.Request) {
+	deviceName, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	filePath := filepath.Join(appConfig.SaveDir, deviceName, "files.json")
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		sendJSON(w, true, http.StatusOK, []FileMeta{})
+		return
+	}
+
+	var entries []FileMeta
+	if err := json.Unmarshal(data, &entries); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata")
+		return
+	}
+
+	
+
+	sendJSON(w, true, http.StatusOK, entries)
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
 
 	appConfig.MaxFormSize = 50 << 20 
-	appConfig.TokensFile = "../../data/devices.json"
-	appConfig.SaveDir = "../../data/uploads"
+	appConfig.TokensFile = "data/devices.json"
+	appConfig.SaveDir = "data/uploads"
 	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
 	
-	devInit()
+	// devInit()
 	mainInit()
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)
 	http.HandleFunc("/whoami", handleAuth)
 	http.HandleFunc("/devices", getDeviceNames)
+	http.HandleFunc("/files", handleFileList)
 
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
