@@ -303,7 +303,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, true, http.StatusOK, "Upload success")
 }
 
-func getDeviceNames(w http.ResponseWriter, r *http.Request) {
+func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
 	deviceName, err := authenticate(r)
 	if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
@@ -331,7 +331,7 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 	filePath := filepath.Join(appConfig.SaveDir, deviceName, "files.json")
 	data, err := os.ReadFile(filePath)
 	if err != nil {
-		sendJSON(w, true, http.StatusOK, []FileMeta{})
+		sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing data")
 		return
 	}
 
@@ -346,6 +346,69 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 	sendJSON(w, true, http.StatusOK, entries)
 }
 
+func handleDelete(w http.ResponseWriter, r *http.Request) {
+
+	sender, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if len(id) == 0 {
+		sendJSON(w, false, http.StatusBadRequest, "invalid id delete argument")
+		return
+	}
+
+	if id == "all" {
+		if err := os.RemoveAll(filepath.Join(appConfig.SaveDir, sender)); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "failed to delete dir")
+			return
+    }
+	} else {
+		filePath := filepath.Join(appConfig.SaveDir, sender, "files.json")
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing metadata")
+			return
+		}
+
+		var entries, newEntries []FileMeta
+		if err := json.Unmarshal(data, &entries); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata")
+			return
+		}
+
+		flag:= true
+		for _, i := range entries {
+			if id != i.ID {
+				newEntries = append(newEntries, i)
+			} else {
+				flag = false
+			}
+		}
+		if flag {
+			sendJSON(w, false, http.StatusBadRequest, "No id found")
+			return
+		}
+
+		newData, err := json.MarshalIndent(newEntries, "", "  ")
+		if err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to encode editted metadata")
+			return
+		}
+
+		if err := os.WriteFile(filePath, newData, 0644); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "Failed to write files file")
+			return
+		}
+
+		//find file with id and delete
+	}
+
+	sendJSON(w, true, http.StatusOK, "delete successful")
+
+}
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
@@ -361,8 +424,9 @@ func main() {
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)
 	http.HandleFunc("/whoami", handleAuth)
-	http.HandleFunc("/devices", getDeviceNames)
+	http.HandleFunc("/devices", handleDeviceNames)
 	http.HandleFunc("/files", handleFileList)
+	http.HendleFunc("/delete", nandleDelete)
 
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
