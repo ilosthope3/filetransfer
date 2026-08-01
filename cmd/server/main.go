@@ -366,6 +366,18 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 			return
     }
 	} else {
+
+		
+		err = os.Remove(filepath.Join(appConfig.SaveDir, sender, id))
+		if err != nil {
+
+			if os.IsNotExist(err) {
+				fmt.Printf("file missing: non fatal: cleaning json\n")
+			} else {	
+				sendJSON(w, false, http.StatusInternalServerError, "Failed to delete physical file (perms err etc)")
+				return
+			}
+		}
 		filePath := filepath.Join(appConfig.SaveDir, sender, "files.json")
 		data, err := os.ReadFile(filePath)
 		if err != nil {
@@ -403,7 +415,6 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		//find file with id and delete
 	}
 
 	sendJSON(w, true, http.StatusOK, "delete successful")
