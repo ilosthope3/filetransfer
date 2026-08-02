@@ -19,12 +19,12 @@
   --vt-c-text-light-2: rgba(60, 60, 60, 0.66);
   --vt-c-text-dark-1: var(--vt-c-white);
   --vt-c-text-dark-2: rgba(235, 235, 235, 0.64);
-
-  --l4: rgb(242, 242, 252);
-  --l3: rgb(208, 208, 244);
-  --l2: rgb(180, 180, 244);
-  --l1: rgb(87, 87, 215);
-  --l0: rgb(80, 80, 219);
+  --l5: rgb(238, 238, 238);
+  --l4: rgb(189, 189, 189);
+  --l3: rgb(36, 36, 36);
+  --l2: rgb(185, 45, 45);
+  --l1: rgb(215, 87, 87);
+  --l0: rgb(104, 5, 5);
   --color-accent-dark: rgb(39, 39, 160);
 }
 
@@ -32,7 +32,10 @@
 :root {
   --bg: var(--l4);
   --border: var(--l1);
+  --borderd: vaR(--l2);
   --bgd: var(--l3);
+  --text: var(--l5);
+  --accd: var(--l0);
   --color-background-soft: var(--vt-c-white-soft);
   --color-background-mute: var(--vt-c-white-mute);
 

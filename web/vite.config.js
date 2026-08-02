@@ -14,6 +14,10 @@ export default defineConfig({
     },
   },
   server: {
+    host: '0.0.0.0', // Allows access from any device on your network
+    port: 5173,      // Your specified port
+    strictPort: true, // Optional: stops the server if port 5173 is in use
+  
     proxy: {
       '/api': {
         target: 'http://localhost:7842',

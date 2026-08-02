@@ -121,12 +121,9 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 
 	_, ok := tokenMap[req.Token]
 	if (ok) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"success": "true"})
+		sendJSON(w, true, http.StatusOK, "Authorized")
 	} else {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid token"})
+		sendJSON(w, false, http.StatusUnauthorized, "Invalid Token")
 		return
 	}
 }
@@ -140,10 +137,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return
 	}
+
+  for _, i := range tokenMap {
+    if strings.ToLower(i) == strings.ToLower(req.Name) {
+      sendJSON(w, false, http.StatusBadRequest, "Name in use")
+      return
+    }
+  }
 	if (req.Password != MAINPASSWORD) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{"error": "invalid password"})
+    sendJSON(w, false, http.StatusUnauthorized, "Wrong password")
 		return
 	} 
 
@@ -153,8 +155,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	newData, _ := json.MarshalIndent(tokenMap, "", "  ")
 	os.WriteFile(appConfig.TokensFile, newData, 0644)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"token": token})
+  sendJSON(w, true, http.StatusOK, token)
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -437,7 +438,7 @@ func main() {
 	http.HandleFunc("/whoami", handleAuth)
 	http.HandleFunc("/devices", handleDeviceNames)
 	http.HandleFunc("/files", handleFileList)
-	http.HendleFunc("/delete", nandleDelete)
+	http.HandleFunc("/delete", handleDelete)
 
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
