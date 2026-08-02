@@ -40,6 +40,10 @@ type (
 		Url string			`json:"url,omitempty"`
 		Sender string		`json:"sender,omitempty"`
 	}
+  FullReturn struct {
+    Files []FileMeta  `json:"files"`
+    Links []LinkMeta  `json:"links"`
+  }
 )
 
 var (
@@ -105,6 +109,72 @@ func mainInit() {
 	if err == nil {
 		json.Unmarshal(data, &tokenMap)
 	}
+}
+
+func readFileMeta(path string) ([]FileMeta, error) {
+  data, err := os.ReadFile(path)
+  if err != nil {
+    return nil, err
+  }
+  var entries []FileMeta
+  if err := json.Unmarshal(data, &entries); err != nil {
+    return nil, err
+  }
+  return entries, nil
+}
+
+func writeFileMeta(path string, entries []FileMeta) error {
+  data, err := json.MarshalIndent(entries, "", "  ")
+  if err != nil {
+    return err
+  }
+  return os.WriteFile(path, data, 0644)
+}
+
+func readLinkMeta(path string) ([]LinkMeta, error) {
+  data, err := os.ReadFile(path)
+  if err != nil {
+    return nil, err
+  }
+  var entries []LinkMeta
+  if err := json.Unmarshal(data, &entries); err != nil {
+    return nil, err
+  }
+  return entries, nil
+}
+
+func writeLinkMeta(path string, entries []LinkMeta) error {
+  data, err := json.MarshalIndent(entries, "", "  ")
+  if err != nil {
+    return err
+  }
+  return os.WriteFile(path, data, 0644)
+}
+
+func filterFileMeta(entries []FileMeta, id string) ([]FileMeta, bool) {
+  found := false
+  result := []FileMeta{}
+  for _, e := range entries {
+    if e.ID == id {
+      found = true
+      continue
+    }
+    result = append(result, e)
+  }
+  return result, found
+}
+
+func filterLinkMeta(entries []LinkMeta, id string) ([]LinkMeta, bool) {
+  found := false
+  result := []LinkMeta{}
+  for _, e := range entries {
+    if e.ID == id {
+      found = true
+      continue
+    }
+    result = append(result, e)
+  }
+  return result, found
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -329,98 +399,202 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+  var entries []FileMeta
+
 	filePath := filepath.Join(appConfig.SaveDir, deviceName, "files.json")
 	data, err := os.ReadFile(filePath)
+	if (err != nil && !os.IsNotExist(err)) {
+		sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing data (files)")
+		return
+	}
+  if !os.IsNotExist(err) {
+    if err := json.Unmarshal(data, &entries); err != nil {
+      sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata (files)")
+      return
+    }
+  }
+
+
+
+	filePath = filepath.Join(appConfig.SaveDir, deviceName, "links.json")
+	data, err = os.ReadFile(filePath)
 	if err != nil {
 		sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing data")
 		return
 	}
 
-	var entries []FileMeta
-	if err := json.Unmarshal(data, &entries); err != nil {
+	var link []LinkMeta
+	if err := json.Unmarshal(data, &link); err != nil {
 		sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata")
 		return
 	}
-
 	
+  var ret FullReturn
+  ret.Links = link
+  ret.Files = entries
 
-	sendJSON(w, true, http.StatusOK, entries)
+	sendJSON(w, true, http.StatusOK, ret)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
+  sender, err := authenticate(r)
+  if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+    return
+  }
 
-	sender, err := authenticate(r)
-	if err != nil {
-		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
-		return
-	}
+  id := r.URL.Query().Get("id")
+  if id == "" {
+    sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
+    return
+  }
 
-	id := r.URL.Query().Get("id")
-	if len(id) == 0 {
-		sendJSON(w, false, http.StatusBadRequest, "invalid id delete argument")
-		return
-	}
+  isFile := r.URL.Query().Get("isFile") == "true"
+  baseDir := filepath.Join(appConfig.SaveDir, sender)
 
-	if id == "all" {
-		if err := os.RemoveAll(filepath.Join(appConfig.SaveDir, sender)); err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "failed to delete dir")
-			return
+  if id == "all" {
+    if isFile {
+      entries, err := os.ReadDir(baseDir)
+      if err != nil {
+        sendJSON(w, false, http.StatusInternalServerError, "failed to read directory")
+        return
+      }
+      for _, entry := range entries {
+        if entry.IsDir() {
+          continue
+        }
+        if entry.Name() == "links.json" {
+          continue
+        }
+        if err := os.Remove(filepath.Join(baseDir, entry.Name())); err != nil {
+          fmt.Printf("could not delete %s: %v\n", entry.Name(), err)
+        }
+      }
+      os.Remove(filepath.Join(baseDir, "files.json"))
+      sendJSON(w, true, http.StatusOK, "all files deleted")
+      return
+    } else {
+      if err := os.Remove(filepath.Join(baseDir, "links.json")); err != nil && !os.IsNotExist(err) {
+        sendJSON(w, false, http.StatusInternalServerError, "failed to delete links.json")
+        return
+      }
+      sendJSON(w, true, http.StatusOK, "links deleted")
+      return
     }
-	} else {
+  }
 
-		
-		err = os.Remove(filepath.Join(appConfig.SaveDir, sender, id))
-		if err != nil {
+  if isFile {
+    filePath := filepath.Join(baseDir, id)
+    if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
+      sendJSON(w, false, http.StatusInternalServerError, "failed to delete physical file")
+      return
+    }
 
-			if os.IsNotExist(err) {
-				fmt.Printf("file missing: non fatal: cleaning json\n")
-			} else {	
-				sendJSON(w, false, http.StatusInternalServerError, "Failed to delete physical file (perms err etc)")
-				return
-			}
-		}
-		filePath := filepath.Join(appConfig.SaveDir, sender, "files.json")
-		data, err := os.ReadFile(filePath)
-		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing metadata")
-			return
-		}
+    metaPath := filepath.Join(baseDir, "files.json")
+    entries, err := readFileMeta(metaPath)
+    if err != nil {
+      if os.IsNotExist(err) {
+        sendJSON(w, false, http.StatusNotFound, "no metadata file")
+      } else {
+        sendJSON(w, false, http.StatusInternalServerError, "failed to read metadata")
+      }
+      return
+    }
+    newEntries, found := filterFileMeta(entries, id)
+    if !found {
+      sendJSON(w, false, http.StatusBadRequest, "ID not found in metadata")
+      return
+    }
+    if err := writeFileMeta(metaPath, newEntries); err != nil {
+      sendJSON(w, false, http.StatusInternalServerError, "failed to write metadata")
+      return
+    }
+  } else {
+    metaPath := filepath.Join(baseDir, "links.json")
+    entries, err := readLinkMeta(metaPath)
+    if err != nil {
+      if os.IsNotExist(err) {
+        sendJSON(w, false, http.StatusNotFound, "no links file")
+      } else {
+        sendJSON(w, false, http.StatusInternalServerError, "failed to read links")
+      }
+      return
+    }
+    newEntries, found := filterLinkMeta(entries, id)
+    if !found {
+      sendJSON(w, false, http.StatusBadRequest, "ID not found in links")
+      return
+    }
+    if err := writeLinkMeta(metaPath, newEntries); err != nil {
+      sendJSON(w, false, http.StatusInternalServerError, "failed to write links")
+      return
+    }
+  }
 
-		var entries, newEntries []FileMeta
-		if err := json.Unmarshal(data, &entries); err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata")
-			return
-		}
-
-		flag:= true
-		for _, i := range entries {
-			if id != i.ID {
-				newEntries = append(newEntries, i)
-			} else {
-				flag = false
-			}
-		}
-		if flag {
-			sendJSON(w, false, http.StatusBadRequest, "No id found")
-			return
-		}
-
-		newData, err := json.MarshalIndent(newEntries, "", "  ")
-		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "Failed to encode editted metadata")
-			return
-		}
-
-		if err := os.WriteFile(filePath, newData, 0644); err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "Failed to write files file")
-			return
-		}
-
-	}
-
-	sendJSON(w, true, http.StatusOK, "delete successful")
-
+  sendJSON(w, true, http.StatusOK, "deleted successfully")
 }
+
+func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
+  sender, err := authenticate(r)
+  if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+    return
+  }
+
+  id := r.URL.Query().Get("id")
+  if id == "" {
+    sendJSON(w, false, http.StatusBadRequest, "missing id")
+    return
+  }
+
+  baseDir := filepath.Join(appConfig.SaveDir, sender)
+
+  // 1. Read metadata to get original filename
+  metaPath := filepath.Join(baseDir, "files.json")
+  entries, err := readFileMeta(metaPath)
+  if err != nil {
+    sendJSON(w, false, http.StatusInternalServerError, "failed to read metadata")
+    return
+  }
+
+  var originalName string
+  found := false
+  for _, entry := range entries {
+    if entry.ID == id {
+      originalName = entry.Name
+      found = true
+      break
+    }
+  }
+  if !found {
+    sendJSON(w, false, http.StatusNotFound, "file not found")
+    return
+  }
+
+  // 2. Open the physical file
+  filePath := filepath.Join(baseDir, id)
+  file, err := os.Open(filePath)
+  if err != nil {
+    sendJSON(w, false, http.StatusNotFound, "file not found on disk")
+    return
+  }
+  defer file.Close()
+
+  // 3. Set headers and stream the file
+  w.Header().Set("Content-Disposition", "attachment; filename=\""+originalName+"\"")
+  w.Header().Set("Content-Type", "application/octet-stream")
+  http.ServeContent(w, r, originalName, time.Now(), file)
+
+  // 4. AFTER streaming (file successfully sent), delete it
+  os.Remove(filePath) // Remove physical file
+
+  // 5. Remove entry from files.json
+  newEntries, _ := filterFileMeta(entries, id)
+  writeFileMeta(metaPath, newEntries)
+
+  fmt.Printf("File %s downloaded and deleted for %s\n", originalName, sender)
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
@@ -430,7 +604,7 @@ func main() {
 	appConfig.SaveDir = "data/uploads"
 	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
 	
-	// devInit()
+	devInit()
 	mainInit()
 
 	http.HandleFunc("/upload", handleUpload)
@@ -439,7 +613,7 @@ func main() {
 	http.HandleFunc("/devices", handleDeviceNames)
 	http.HandleFunc("/files", handleFileList)
 	http.HandleFunc("/delete", handleDelete)
-
+	http.HandleFunc("/download-and-delete", handleDownloadAndDelete) // Download + Delete (single)
 	fmt.Println("started server")
 	http.ListenAndServe(":7842", nil)	
 	
