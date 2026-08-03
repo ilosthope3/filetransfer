@@ -13,13 +13,14 @@ import (
 	"github.com/google/uuid"
 )
 
-const MAINPASSWORD = "123"
+
 
 type (
 	Config struct {
     TokensFile string
     SaveDir    string
 		MaxFormSize int64
+		Password 		string
 	}
 	APIResponse struct {
     Success bool        `json:"success"`
@@ -104,6 +105,14 @@ func devInit() {
 }
 
 func mainInit() {
+
+	appConfig.MaxFormSize = 50 << 20 
+	appConfig.TokensFile = "data/devices.json"
+	appConfig.SaveDir = "data/uploads"
+	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
+	
+	// devInit()
+
 	data, err := os.ReadFile(appConfig.TokensFile)
 	tokenMap = make(map[string]string)
 	if err == nil {
@@ -177,6 +186,24 @@ func filterLinkMeta(entries []LinkMeta, id string) ([]LinkMeta, bool) {
   return result, found
 }
 
+func readOrCreateJSON(filePath string, v interface{}) error {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			if writeErr := os.WriteFile(filePath, []byte("[]\n"), 0644); writeErr != nil {
+				return fmt.Errorf("failed to create file: %w", writeErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to read file: %w", err)
+	}
+
+	if err := json.Unmarshal(data, v); err != nil {
+		return fmt.Errorf("failed to parse JSON: %w", err)
+	}
+	return nil
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func handleAuth(w http.ResponseWriter, r *http.Request) {
@@ -214,7 +241,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
       return
     }
   }
-	if (req.Password != MAINPASSWORD) {
+	if (req.Password != appConfig.Password) {
     sendJSON(w, false, http.StatusUnauthorized, "Wrong password")
 		return
 	} 
@@ -398,41 +425,26 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	baseDir := filepath.Join(appConfig.SaveDir, deviceName)
 
-  var entries []FileMeta
-
-	filePath := filepath.Join(appConfig.SaveDir, deviceName, "files.json")
-	data, err := os.ReadFile(filePath)
-	if (err != nil && !os.IsNotExist(err)) {
-		sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing data (files)")
-		return
-	}
-  if !os.IsNotExist(err) {
-    if err := json.Unmarshal(data, &entries); err != nil {
-      sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata (files)")
-      return
-    }
-  }
-
-
-
-	filePath = filepath.Join(appConfig.SaveDir, deviceName, "links.json")
-	data, err = os.ReadFile(filePath)
-	if err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, "Failed to read existing data")
+	var files []FileMeta
+	filePath := filepath.Join(baseDir, "files.json")
+	if err := readOrCreateJSON(filePath, &files); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	var link []LinkMeta
-	if err := json.Unmarshal(data, &link); err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, "Failed to parse metadata")
+	var links []LinkMeta
+	linkPath := filepath.Join(baseDir, "links.json")
+	if err := readOrCreateJSON(linkPath, &links); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, err.Error())
 		return
 	}
-	
-  var ret FullReturn
-  ret.Links = link
-  ret.Files = entries
 
+	ret := FullReturn{
+		Files: files,
+		Links: links,
+	}
 	sendJSON(w, true, http.StatusOK, ret)
 }
 
@@ -549,7 +561,6 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
 
   baseDir := filepath.Join(appConfig.SaveDir, sender)
 
-  // 1. Read metadata to get original filename
   metaPath := filepath.Join(baseDir, "files.json")
   entries, err := readFileMeta(metaPath)
   if err != nil {
@@ -571,7 +582,6 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  // 2. Open the physical file
   filePath := filepath.Join(baseDir, id)
   file, err := os.Open(filePath)
   if err != nil {
@@ -580,15 +590,12 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
   }
   defer file.Close()
 
-  // 3. Set headers and stream the file
   w.Header().Set("Content-Disposition", "attachment; filename=\""+originalName+"\"")
   w.Header().Set("Content-Type", "application/octet-stream")
   http.ServeContent(w, r, originalName, time.Now(), file)
 
-  // 4. AFTER streaming (file successfully sent), delete it
-  os.Remove(filePath) // Remove physical file
+  os.Remove(filePath) 
 
-  // 5. Remove entry from files.json
   newEntries, _ := filterFileMeta(entries, id)
   writeFileMeta(metaPath, newEntries)
 
@@ -599,12 +606,7 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 
-	appConfig.MaxFormSize = 50 << 20 
-	appConfig.TokensFile = "data/devices.json"
-	appConfig.SaveDir = "data/uploads"
-	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
 	
-	devInit()
 	mainInit()
 
 	http.HandleFunc("/upload", handleUpload)
@@ -613,8 +615,7 @@ func main() {
 	http.HandleFunc("/devices", handleDeviceNames)
 	http.HandleFunc("/files", handleFileList)
 	http.HandleFunc("/delete", handleDelete)
-	http.HandleFunc("/download-and-delete", handleDownloadAndDelete) // Download + Delete (single)
-	fmt.Println("started server")
+	http.HandleFunc("/download-and-delete", handleDownloadAndDelete) 
 	http.ListenAndServe(":7842", nil)	
 	
 }

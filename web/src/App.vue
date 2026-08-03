@@ -92,6 +92,7 @@
             <path d="M6 6L18 18" />
           </svg>
         </button>
+        <p class="fileErrText">{{ fileErrMsg }} </p>
         <div class="fileHeader">
           <div class="wrapper">
             <h2>Files</h2>
@@ -128,25 +129,6 @@
         </ul>
       </div>
 
-      <!-- <div v-if="links.length != 0" class="block">
-        <button class="refreshBtn refreshBtn1" @click="fetchFiles">
-          <svg fill="#ffffff" class="refreshSvg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" id="Capa_1" x="0px" y="0px" viewBox="0 0 512 512" style="enable-background:new 0 0 512 512;" xml:space="preserve" width="512" height="512">                 
-            <path d="M489.797,256c-10.791-0.141-19.924,7.939-21.099,18.667c-9.959,117.754-113.491,205.138-231.245,195.179   S32.315,356.354,42.275,238.6S155.766,33.462,273.52,43.421c50.983,4.312,98.733,26.75,134.592,63.245h-66.603   c-11.782,0-21.333,9.551-21.333,21.333s9.551,21.333,21.333,21.333h88.384c21.874-0.012,39.604-17.742,39.616-39.616V21.333   C469.509,9.551,459.958,0,448.176,0c-11.782,0-21.333,9.551-21.333,21.333v44.331C321.548-28.425,159.915-19.341,65.826,85.954   s-85.005,266.927,20.29,361.016s266.927,85.005,361.016-20.29c36.575-40.931,59.007-92.547,63.977-147.214   c1.096-11.814-7.593-22.279-19.407-23.375C491.069,256.033,490.434,256.002,489.797,256z"/>
-          </svg>
-        </button>
-        <div class="fileHeader">
-          <div class="wrapper">
-            <h2>Your Links</h2>
-            
-          </div>
-        </div>
-        <ul class="fileList">
-          <li class="fileItem" v-for="link in links" :key="link.url">
-            {{link.url}}
-          </li>
-        </ul>
-      </div> -->
-
       <div v-if="links.length != 0" class="block">
         <button class="refreshBtn refreshBtn1" @click="fetchFiles">
           <svg fill="#ffffff" class="refreshSvg" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" version="1.1" id="Capa_1" x="0px" y="0px" viewBox="0 0 512 512" style="enable-background:new 0 0 512 512;" xml:space="preserve" width="512" height="512">                 
@@ -159,6 +141,7 @@
             <path d="M6 6L18 18" />
           </svg>
         </button>
+        <p class="fileErrText">{{ linkErrMsg }} </p>
         <div class="fileHeader">
           <div class="wrapper">
             <h2>Links</h2>
@@ -185,7 +168,15 @@
           </li>
         </ul>
       </div>
+
+      <div class="block">
+        <button @click="copyToken" class="copyBtn">
+          Copy Device Token
+        </button>
+      </div>
     </div>
+    
+
     
   </div>
 </template>
@@ -207,7 +198,8 @@
   const deviceNames = ref([])
   const dropZoneRef = ref(null)
   const inputFiles = ref([])
-  const isSyncing = ref(false)
+  const fileErrMsg = ref('')
+  const linkErrMsg = ref('')
   /////////////////////////////////////////////////////////////////////////////////
 
   const handleFileChange = async (files) => {
@@ -215,7 +207,7 @@
   }
 
   const handleDelete = async (id, isFile) => {
-    console.log(id)
+    
     try {
       const res = await fetch(`/api/delete?id=${id}&isFile=${isFile}`, {
           headers: { 'Authorization': `Bearer ${token.value}` }
@@ -225,13 +217,25 @@
         if (data.success) {
           fetchFiles()
         } else {
-          console.log(data.error)
+          if (isFile) {
+            fileErrMsg.value = data.error
+          } else {
+            linkErrMsg.value = data.error
+          }
         }
       } else {
-        console.log('Unknown error: ', res.status)
+        if (isFile) {
+          fileErrMsg.value = 'Unknown error: '+ res.status
+        } else {
+          linkErrMsg.value = 'Unknown error: ' + res.status
+        }
       }
     } catch (err) {
-      console.log('JSError: ',err)
+      if (isFile) {
+        fileErrMsg.value = 'JS error: '+ err
+      } else {
+        linkErrMsg.value = 'JS error: ' + err
+      }
     }
   }
 
@@ -269,15 +273,18 @@
       const res = await fetch('/api/files', {
         headers: { 'Authorization': `Bearer ${token.value}` }
       })
-      console.log(res)
       if (res.ok) {
         const data = await res.json()
+        if (data.success) {
+          links.value = data.data.links
+          files.value = data.data.files
+        } else {
+          loginMsg.value = data.error
+        }
         
-        links.value = data.data.links
-        files.value = data.data.files
       }
     } catch (err) {
-      console.error('Failed to fetch files', err)
+      loginMsg.value = 'Failed to fetch files: ' + err
     }
   }
 
@@ -322,7 +329,6 @@
 
   const fetchNames = async () => {
     try {
-      console.log('1')
       const res = await fetch('/api/devices', {
         headers: { 'Authorization': `Bearer ${token.value}` }
       })
@@ -332,7 +338,7 @@
         fetchFiles()
       }
     } catch (err) {
-      console.error('Failed to fetch device names', err)
+      loginMsg.value = 'Failed to fetch device names' + err
     }
   }
 
@@ -348,15 +354,12 @@
   const copyToClipboard = async (text, id) => {
     try {
       await navigator.clipboard.writeText(text)
-      alert('Link copied to clipboard!')
       handleDelete(id, false)
     } catch (err) {
-      console.error('Failed to copy:', err)
-      alert('Failed to copy. Please copy manually.')
+      linkErrMsg.value = 'Failed to copy: ', err
     }
   }
   
-// Download + Delete (single file)
   const downloadAndDelete = async (id) => {
     try {
       const res = await fetch(`/api/download-and-delete?id=${id}`, {
@@ -382,47 +385,41 @@
       document.body.removeChild(a)
       URL.revokeObjectURL(url)
 
-      // Remove from local list (since it's deleted on server)
       files.value = files.value.filter(f => f.id !== id)
-
+      return true
     } catch (err) {
-      console.error(err)
-      alert('Download & Delete failed')
+      fileErrMsg.value = "ERR: " + err
+      return false
+
     }
   }
 
-  // Sync All (Download ALL + Delete ALL)
   const syncAll = async () => {
-    if (files.value.length === 0) {
-      alert('No files to sync')
-      return
-    }
-
-    if (!confirm(`Download and delete all ${files.value.length} files?`)) {
-      return
-    }
-
-    isSyncing.value = true
-
-    let successCount = 0
-    let failCount = 0
-
-    // Loop through a COPY of the list (since we'll be removing items)
     const fileIds = files.value.map(f => f.id)
-
     for (const id of fileIds) {
-      const success = await downloadAndDelete(id)
-      if (success) {
-        successCount++
-        // Remove from local list immediately
-        files.value = files.value.filter(f => f.id !== id)
-      } else {
-        failCount++
-      }
+      downloadAndDelete(id)
     }
-
-    isSyncing.value = false
-    alert(`Sync complete: ${successCount} downloaded, ${failCount} failed`)
+  }
+  
+  const copyToken = async () => {
+    try {
+      const res = await fetch ('/api/whoami', {
+        method: 'POST',
+        headers: {'Content-Type': 'applcation/json'},
+        body: JSON.stringify({Token: token.value})
+      })
+      if (res.ok) {
+        const data = res.json()
+        if (data.success) {
+          await navigator.clipboard.writeText(token.value)
+          return
+        } 
+        alert('Err: ' ,data.error)
+      }
+      alert('Failed to copy, status: ', res.status)
+    } catch (err) {
+      alert('Failed to copy, JS  err: ', err)
+    }
   }
 
   ///////////////////////////////////////////////////////////////////////////////////
@@ -435,7 +432,12 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ Token: token.value })
         })
-        if (res.ok) {
+        if (res.status == 502) {
+          loginMsg.value = "Couldn't connect to server"
+          return
+        }
+        const data = await res.json()
+        if (data.success) {
           isLoggedIn.value = true
           fetchNames()
           fetchFiles()
@@ -582,7 +584,7 @@
   display: flex;
   flex-direction: column;
   gap: 20px;
-  padding-top: 15vh;
+  padding: 5vh 0;
   width: 50vw;
 }
 
@@ -868,5 +870,39 @@
 
 .fileLink:hover {
   transform: scale(1.1);
+}
+
+.fileErrorText {
+  font-size: 0.8rem;
+  font-weight: bold;
+  position: absolute;
+  bottom: calc(100% + 5px);
+  left: 10px;
+}
+
+.copyBtn {
+  width: 50%;
+  align-self: center;
+  aspect-ratio: 5;
+  outline: none;
+  border: 4px solid var(--bgd);
+  border-radius: 10px;
+  transition: all 0.2s ease;
+  background-color: var(--border);
+  font-size: 1.1rem;
+  font-weight: bold;
+  outline-color: var(--text);
+  color: var(--text);
+}
+
+.copyBtn:hover {
+  background-color: var(--borderd);
+  border-color: var(--border);
+}
+
+.copyBtn:active {
+  border-color: var(--bgd);
+  outline: 2px solid var(--border);
+
 }
 </style>
