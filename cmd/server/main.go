@@ -384,19 +384,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 			
-		// metaFile, err := os.Create(filepath.Join(receiverPath, metadata.ID + ".meta.json"))
-		// if err != nil {
-		// 	sendJSON(w, false, http.StatusInternalServerError, "Failed to create meta file")
-		// 	return
-		// }
-		// defer metaFile.Close()
-
-		// encoder := json.NewEncoder(metaFile)
-		// encoder.SetIndent("", "  ") // Makes the JSON human-readable
-		// if err := encoder.Encode(metadata); err != nil {
-		// 	sendJSON(w, false, http.StatusInternalServerError, "Failed to write metadata")
-		// 	return
-		// }
 	}
 	sendJSON(w, true, http.StatusOK, "Upload success")
 }
