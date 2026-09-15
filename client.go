@@ -3,9 +3,18 @@ package main
 import (
 	"fmt"
 	"net/http"
-	// "io"
+	"io"
 	"encoding/json"
+	"bytes"
+	// "errors"
+	// "bufio"
+	"os"
+	// "strings"
+	"time"
+	"github.com/joho/godotenv"
 )
+
+
 
 
 type APIResponse struct {
@@ -14,58 +23,92 @@ type APIResponse struct {
     Error   string      `json:"error,omitempty"`
 	}
 
+// type ClientConfig struct {
+// 	Config interface
+// }
+
+type Client struct {
+	Conn string
+	Token string
+	Name string
+	Client http.Client
+}
+
 
 func (a APIResponse) String() string {
-	// r := ""
-	// if a.Success {
-	// 	r += fmt.Sprintf("SUCCESS: TRUE;\nDATA: %v", a.Data)
-		
-	// } else {
-	// 	r += "SUCCESS: FALSE;\nERROR: " + a.Error
-
-	// }
-	// return r
-
-
 	r, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
 		return "error json conversion"
 	}
 	return string(r)
 
-} 
+}
 
+func (c *Client) Init(){
+	// fmt.Println(os.Getenv("API_TOKEN"), "!!!!!!!!!!!!!!!!!")
+	c.Token = os.Getenv("API_TOKEN")
+	c.Conn = "http://localhost:7842/"
+	c.Client = http.Client{
+		Timeout: 5*time.Second,
+	} //make all of this load from env and config files
+}
 
-func main() {
-	resp, err := http.Get("http://localhost:7842/files")
+func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
+	var reader io.Reader
+
+	if method == "POST" && data==nil { //post eq always has a body
+		data = map[string]interface{}{}
+	}
+
+	if data != nil {
+		b, err := json.Marshal(data)
+		if err != nil {
+			return nil, fmt.Errorf("marshal body: %w", err)
+		}
+		reader = bytes.NewReader(b)
+	}
+
+	req, err := http.NewRequest(method, c.Conn+path, reader)
 	if err != nil {
-		fmt.Println("error: ", err)
-		return
+		return nil, fmt.Errorf("create request: %w", err)
 	}
 	
-	defer resp.Body.Close()
-
-	// Accessing the struct fields
-	fmt.Printf("Type: %T\n", resp)         // Output: *http.Response
-	fmt.Println("Status:", resp.StatusCode) // Output: 200
-
-
-	// bytes, err := io.ReadAll(resp.Body) 
-	// if err != nil {
-	// 	fmt.Printf("error while read")
-	// 	return
-	// }
-
-	// fmt.Printf(string(bytes))	
-
-	// fmt.Println("body:", resp.Body) 
-
-	var apiR APIResponse
-	err = json.NewDecoder(resp.Body).Decode(&apiR)
-	if err != nil {
-		fmt.Printf("err decoding: ", err)
-		return
+	if data != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
 
-	fmt.Println(apiR)
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var out APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err)
+	}
+	return &out, nil
+}
+
+func main() {
+	
+	var c Client
+	c.Init()
+	
+
+	r,err := c.Send("POST", "auth",map[string]string{
+		"Name":"Name1",
+		"Password": "123",
+	})
+	if err != nil {
+		fmt.Printf("%w", err)
+		return 
+	}
+
+	fmt.Println(r)
+
+	
 }

@@ -11,6 +11,7 @@ import (
 	"errors"
 	"strings"
 	"github.com/google/uuid"
+	"log"
 )
 
 
@@ -104,20 +105,49 @@ func devInit() {
 		fmt.Println("files reset")
 }
 
-func mainInit() {
-
-	appConfig.MaxFormSize = 50 << 20 
-	appConfig.TokensFile = "data/devices.json"
-	appConfig.SaveDir = "data/uploads"
-	os.MkdirAll(appConfig.SaveDir, os.ModePerm)
-	
-	// devInit()
+func refreshPaths() {
+	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
+		log.Fatalf("create save dir: %v", err)
+	}
 
 	data, err := os.ReadFile(appConfig.TokensFile)
 	tokenMap = make(map[string]string)
 	if err == nil {
-		json.Unmarshal(data, &tokenMap)
+		if err := json.Unmarshal(data, &tokenMap); err != nil {
+			log.Printf("parse tokens file: %v", err) 
+		}
+	} else if !os.IsNotExist(err) {
+		log.Printf("read tokens file: %v", err)
 	}
+
+	for _, name := range tokenMap {
+		dir := filepath.Join(appConfig.SaveDir, name)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			log.Printf("create inbox %s: %v", dir, err)
+			continue
+		}
+		for _, f := range []string{"links.json", "files.json"} {
+			p := filepath.Join(dir, f)
+			if _, err := os.Stat(p); os.IsNotExist(err) {
+				os.WriteFile(p, []byte("{}"), 0o644)
+			}
+		}
+	}
+}
+
+func mainInit() {
+	
+	appConfig.MaxFormSize = 50 << 20 
+	appConfig.TokensFile = "data/devices.json"
+	appConfig.SaveDir = "data/inbox"
+	appConfig.Password = "123"
+
+
+	refreshPaths()
+	
+	// devInit()
+
+	
 }
 
 func readFileMeta(path string) ([]FileMeta, error) {
@@ -212,7 +242,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Token string }
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		sendJSON(w, false, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
 
@@ -221,19 +251,28 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, true, http.StatusOK, "Authorized")
 	} else {
 		sendJSON(w, false, http.StatusUnauthorized, "Invalid Token")
-		return
 	}
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
-
-	fmt.Println("handling lgoin")
 	var req struct{ Password, Name string }
+	fmt.Println("handling lgoin")
+	
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
-		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		sendJSON(w, false, http.StatusBadRequest, "Invalid JSON")
 		return
 	}
+
+	if strings.ContainsAny(req.Name, `/\..`) {
+		sendJSON(w, false, http.StatusBadRequest, "Bad name")
+		return
+	}
+
+	if (req.Password != appConfig.Password) {
+    sendJSON(w, false, http.StatusUnauthorized, "Wrong password")
+		return
+	} 
 
   for _, i := range tokenMap {
     if strings.ToLower(i) == strings.ToLower(req.Name) {
@@ -241,16 +280,20 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
       return
     }
   }
-	if (req.Password != appConfig.Password) {
-    sendJSON(w, false, http.StatusUnauthorized, "Wrong password")
-		return
-	} 
+	
 
 	token := fmt.Sprintf("token-%d", time.Now().UnixNano())
 	
 	tokenMap[token] = req.Name
 	newData, _ := json.MarshalIndent(tokenMap, "", "  ")
-	os.WriteFile(appConfig.TokensFile, newData, 0644)
+
+	
+	if err:=os.WriteFile(appConfig.TokensFile, newData, 0644); err!= nil {
+		sendJSON(w, false, http.StatusInternalServerError, "write error")
+		return
+	}
+	
+	refreshPaths()
 
   sendJSON(w, true, http.StatusOK, token)
 }
@@ -409,7 +452,7 @@ func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
 func handleFileList(w http.ResponseWriter, r *http.Request) {
 	deviceName, err := authenticate(r)
 	if err != nil {
-		sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
+		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 	baseDir := filepath.Join(appConfig.SaveDir, deviceName)
