@@ -112,6 +112,7 @@ func refreshPaths() {
 
 	data, err := os.ReadFile(appConfig.TokensFile)
 	tokenMap = make(map[string]string)
+	
 	if err == nil {
 		if err := json.Unmarshal(data, &tokenMap); err != nil {
 			log.Printf("parse tokens file: %v", err) 
@@ -145,6 +146,7 @@ func mainInit() {
 
 	refreshPaths()
 	
+
 	// devInit()
 
 	
@@ -638,6 +640,8 @@ func main() {
 
 	
 	mainInit()
+	InitDB("items.db")
+	defer DB.Close()
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)
