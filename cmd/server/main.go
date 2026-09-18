@@ -129,7 +129,7 @@ func refreshPaths() {
 		for _, f := range []string{"links.json", "files.json"} {
 			p := filepath.Join(dir, f)
 			if _, err := os.Stat(p); os.IsNotExist(err) {
-				os.WriteFile(p, []byte("{}"), 0o644)
+				os.WriteFile(p, []byte("[]"), 0o644)
 			}
 		}
 	}
@@ -227,7 +227,7 @@ func readOrCreateJSON(filePath string, v interface{}) error {
 		}
 		return fmt.Errorf("failed to read file: %w", err)
 	}
-
+	fmt.Println(data)
 	if err := json.Unmarshal(data, v); err != nil {
 		return fmt.Errorf("failed to parse JSON: %w", err)
 	}
@@ -274,9 +274,9 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	} 
 
-  for _, i := range tokenMap {
+  for t, i := range tokenMap {
     if strings.ToLower(i) == strings.ToLower(req.Name) {
-      sendJSON(w, false, http.StatusBadRequest, "Name in use")
+			sendJSON(w, true, http.StatusOK, t) //logged in to an acc
       return
     }
   }

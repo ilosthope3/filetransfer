@@ -7,11 +7,11 @@ import (
 	"encoding/json"
 	"bytes"
 	// "errors"
-	// "bufio"
+	"bufio"
 	"os"
-	// "strings"
+	"strings"
 	"time"
-	"github.com/joho/godotenv"
+	// "github.com/joho/godotenv"
 )
 
 
@@ -93,22 +93,75 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	return &out, nil
 }
 
+
+
 func main() {
 	
 	var c Client
 	c.Init()
+
+	scan := bufio.NewReader(os.Stdin)
+
+	for {
+
+
+		if c.Token == ""{
+			fmt.Printf("Auth for :")
+			in, _ := scan.ReadString('\n')
+			in = strings.TrimSpace(in)
+			if in == "y"{
+
+				r,err := c.Send("POST", "auth",map[string]string{
+					"Name":"Name4",
+					"Password": "123",
+				})
+				if err != nil {
+					fmt.Printf("%w", err)
+					return 
+				}
+
+				fmt.Println(r)
+				token, ok := r.Data.(string)
+
+				if !ok {
+					fmt.Println("errrrror u bs type shi")
+				} else {
+					c.Token = token
+					fmt.Println("yayyyy ", c.Token, " stored in client")
+				}
+			} else {
+				fmt.Println("well ok then")
+			}
+		} else {
+			in, _ := scan.ReadString('\n')
+			in = strings.TrimSpace(in)
+			if in == "1"{
+				r, err := c.Send("GET", "devices", nil)
+				if err != nil {
+					fmt.Printf("%w", err)
+					return 
+				}
+				fmt.Println(r)
+			} else if in == "2"{
+				r, err := c.Send("GET", "files", nil)
+				if err != nil {
+					fmt.Printf("%w", err)
+					return 
+				}
+				fmt.Println(r)
+
+			}else if in == "0"{
+				fmt.Println("exit")
+				return
+			}
+
+		}
+
+		
+	}
 	
 
-	r,err := c.Send("POST", "auth",map[string]string{
-		"Name":"Name1",
-		"Password": "123",
-	})
-	if err != nil {
-		fmt.Printf("%w", err)
-		return 
-	}
-
-	fmt.Println(r)
+	
 
 	
 }
