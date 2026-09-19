@@ -12,6 +12,8 @@ import (
 	"strings"
 	"github.com/google/uuid"
 	"log"
+	"crypto/rand"
+	"encoding/hex"
 )
 
 
@@ -105,35 +107,42 @@ func devInit() {
 		fmt.Println("files reset")
 }
 
-func refreshPaths() {
+func refreshUsers() {
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
 		log.Fatalf("create save dir: %v", err)
 	}
 
 	data, err := os.ReadFile(appConfig.TokensFile)
-	tokenMap = make(map[string]string)
 	
-	if err == nil {
-		if err := json.Unmarshal(data, &tokenMap); err != nil {
-			log.Printf("parse tokens file: %v", err) 
-		}
-	} else if !os.IsNotExist(err) {
-		log.Printf("read tokens file: %v", err)
+	rows, err = DB.Query("SELECT token, username FROM users;")
+	defer rows.Close()
+	if err == sql.ErrNoRows {
+		
+		fmt.Println("no users found")
+		return
+	} else {
+		log.Fatal("error accessing db")
 	}
 
-	for _, name := range tokenMap {
-		dir := filepath.Join(appConfig.SaveDir, name)
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			log.Printf("create inbox %s: %v", dir, err)
-			continue
-		}
-		for _, f := range []string{"links.json", "files.json"} {
-			p := filepath.Join(dir, f)
-			if _, err := os.Stat(p); os.IsNotExist(err) {
-				os.WriteFile(p, []byte("[]"), 0o644)
-			}
-		}
+	tokenMap = make(map[string]string)
+	for rows.Next() {
+		
 	}
+
+
+	// for _, name := range tokenMap {
+	// 	dir := filepath.Join(appConfig.SaveDir, name)
+	// 	if err := os.MkdirAll(dir, 0o755); err != nil {
+	// 		log.Printf("create inbox %s: %v", dir, err)
+	// 		continue
+	// 	}
+	// 	for _, f := range []string{"links.json", "files.json"} {2
+	// 		p := filepath.Join(dir, f)
+	// 		if _, err := os.Stat(p); os.IsNotExist(err) {
+	// 			os.WriteFile(p, []byte("[]"), 0o644)
+	// 		}
+	// 	}
+	// }
 }
 
 func mainInit() {
@@ -258,6 +267,7 @@ func handleAuth(w http.ResponseWriter, r *http.Request) {
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Password, Name string }
+	var row struct{ Username, Token string}
 	fmt.Println("handling lgoin")
 	
 	err := json.NewDecoder(r.Body).Decode(&req)
@@ -275,29 +285,32 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
     sendJSON(w, false, http.StatusUnauthorized, "Wrong password")
 		return
 	} 
+	
+	err = DB.QueryRow("SELECT username, token FROM users WHERE username = ?", req.Name).Scan(&row.Username, &row.Token)
 
-  for t, i := range tokenMap {
-    if strings.ToLower(i) == strings.ToLower(req.Name) {
-			sendJSON(w, true, http.StatusOK, t) //logged in to an acc
-      return
+	if err == sql.ErrNoRows {
+
+		b := make([]byte, 32) 
+    if _, err := rand.Read(b); err != nil {
+        log.Fatal("rand failed:", err)
     }
-  }
-	
+		token := fmt.Sprintf("token-%s",  hex.EncodeToString(b))
 
-	token := fmt.Sprintf("token-%d", time.Now().UnixNano())
-	
-	tokenMap[token] = req.Name
-	newData, _ := json.MarshalIndent(tokenMap, "", "  ")
+		if _, err = DB.Exec("INSERT INTO users (username, token) VALUES(? , ?);", req.Name, token); err != nil {
+			sendJSON(w, false, http.StatusInternalServerError, "failed adding new user to db")
+			return
+		}
+		sendJSON(w, true, http.StatusOK, token)
+		return
+	} 
 
-	
-	if err:=os.WriteFile(appConfig.TokensFile, newData, 0644); err!= nil {
-		sendJSON(w, false, http.StatusInternalServerError, "write error")
+	if err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "DB query to check if users contains login failed")
 		return
 	}
 	
-	refreshPaths()
-
-  sendJSON(w, true, http.StatusOK, token)
+	sendJSON(w, true, http.StatusOK, row.Token)
+	return 
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
