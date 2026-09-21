@@ -285,6 +285,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link := r.FormValue("text")
+	// fmt.Println(link)
 	receiver := r.FormValue("receiver")
 
 	if receiver == "" || receiver == "." || receiver == ".." {

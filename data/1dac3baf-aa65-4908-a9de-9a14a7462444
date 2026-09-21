@@ -1,0 +1,7 @@
+{
+  "server": "http://localhost:7842/",
+  "timeout_seconds": 5,
+  "save_dir": "~/Downloads/filetransfer",
+  "autodownload": true,
+  "poll_interval_seconds": 30
+}

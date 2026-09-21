@@ -135,13 +135,13 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader) (*API
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var out APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-			return nil, err
+		return nil, err
 	}
 	return &out, nil
 }
@@ -274,7 +274,7 @@ func main() {
 }
 
 func usage() {
-    fmt.Println(`usage: filetransfer <command> [args]
+	fmt.Println(`usage: filetransfer <command> [args]
 
 	commands:
   auth <name> <password>     authenticate and get a token
@@ -342,19 +342,62 @@ func cmdDevices(c *Client, args []string) {
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].ID < devices[j].ID
 	})
-
+	fmt.Println("\n\tID\tName")
 	for _, d := range devices {
 		fmt.Printf("\t%v\t%v\n", d.ID, d.Name)
 	}
 }
 
+
 func cmdFiles(c *Client, args []string) {
-	r, err := c.Send("GET", "files", nil)
-	if err != nil {
-		fmt.Println("error:", err)
-		os.Exit(1)
-	}
-	fmt.Println(r)
+    r, err := c.Send("GET", "files", nil)
+    if err != nil {
+        fmt.Println("error:", err)
+        os.Exit(1)
+    }
+		fmt.Println(r)
+    listAny, ok := r.Data.([]any)
+		if !ok {
+				fmt.Println("expected array, got", r.Data)
+				return
+		}
+
+		var list []map[string]any
+		for _, item := range listAny {
+				m, ok := item.(map[string]any)
+				if !ok {
+						continue
+				}
+				list = append(list, m)
+		}
+
+    if len(list) == 0 {
+        fmt.Println("Empty")
+        return
+    }
+
+    // 1. Extract keys from the first row
+    keys := make([]string, 0, len(list[0]))
+    for k := range list[0] {
+        keys = append(keys, k)
+    }
+
+    // 2. Sort them (deterministic order)
+    sort.Strings(keys)
+
+    // 3. Print header
+    for _, k := range keys {
+        fmt.Printf("\t%s", k)
+    }
+    fmt.Println()
+
+    // 4. Print each row in the SAME key order
+    for _, row := range list {
+        for _, k := range keys {
+            fmt.Printf("\t%v", row[k])
+        }
+        fmt.Println()
+    }
 }
 
 func cmdWho(c *Client, args []string) {
@@ -363,7 +406,22 @@ func cmdWho(c *Client, args []string) {
 		fmt.Println("error:", err)
 		os.Exit(1)
 	}
-	fmt.Println(r)
+	type Device struct {
+    ID   float64
+    Name string
+	}
+
+	dev, ok := r.Data.(map[string]any)
+	if !ok {
+		fmt.Println("Error when parsing response")
+		return
+	}
+	id, _ := dev["id"].(float64)
+	name, _ := dev["name"].(string)
+
+	fmt.Println("\n\tID\tName")
+	fmt.Printf("\n\t%v\t%v\n", id, name)
+	
 }
 
 func cmdSend(c *Client, args []string) {
@@ -389,22 +447,27 @@ func cmdSend(c *Client, args []string) {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
 	}
-	fmt.Println(resp)
+	if resp.Success {
+		fmt.Println("File sent successfully")
+	} else {
+		fmt.Printf("Error when sending file: %v\n", resp.Error)
+	}
 }
 
 func cmdLink(c *Client, args []string) {
-	if len(args) != 1 {
+	if len(args) < 1 {
 		fmt.Println("usage: filetransfer link <receiver>:<url>")
 		os.Exit(1)
 	}
-
-	receiver, url, found := strings.Cut(args[0], ":")
+	
+	inp := strings.Join(args, " ")
+	receiver, url, found := strings.Cut(inp, ":")
 	if !found {
 		fmt.Println("format must be <receiver>:<url>")
 		os.Exit(1)
 	}
 
-	body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), "", strings.TrimSpace(url))
+	body, contentType, err := buildUploadBody(receiver, "", url)
 	if err != nil {
 		fmt.Println("error building body:", err)
 		os.Exit(1)
@@ -415,5 +478,9 @@ func cmdLink(c *Client, args []string) {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
 	}
-	fmt.Println(resp)
+	if resp.Success {
+		fmt.Println("Text sent successfully")
+	} else {
+		fmt.Printf("Error when sending text: %v\n", resp.Error)
+	}
 }
