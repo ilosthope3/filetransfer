@@ -10,27 +10,15 @@
 *.test
 *.out
 
-# Your compiled binary (if you build locally)
-mytransfer
-server
-cmd/server/server
-cmd/client/client
 
-# Dependency directories (Go modules)
-vendor/
 
-# Go workspace file
 go.work
 go.work.sum
 
-# =====================================
-# VUE / NODE (Frontend)
-# =====================================
-# Node modules (huge, never commit)
 node_modules/
 web/node_modules/
 
-# Build output
+
 dist/
 web/dist/
 dist-ssr/
