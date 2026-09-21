@@ -14,6 +14,7 @@ import (
 	"log"
 	"crypto/rand"
 	"encoding/hex"
+	"database/sql"
 )
 
 
@@ -43,11 +44,13 @@ type (
 		Time string			`json:"timestamp,omitempty"`
 		Url string			`json:"url,omitempty"`
 		Sender string		`json:"sender,omitempty"`
+
 	}
   FullReturn struct {
     Files []FileMeta  `json:"files"`
     Links []LinkMeta  `json:"links"`
   }
+	
 )
 
 var (
@@ -75,23 +78,31 @@ func sendJSON(w http.ResponseWriter,success bool, code int, msg interface{}) {
 	json.NewEncoder(w).Encode(resp)
 }
 
-func authenticate(r *http.Request) (string, error) {
+func authenticate(r *http.Request) (UserRecord, error) {
+		var row UserRecord
+
     authHeader := r.Header.Get("Authorization")
     if authHeader == "" {
-        return "", errors.New("missing Authorization header")
+        return row, errors.New("missing Authorization header")
     }
 
     parts := strings.Split(authHeader, " ")
     if len(parts) != 2 || parts[0] != "Bearer" {
-        return "", errors.New("invalid Authorization format")
+        return row, errors.New("invalid Authorization format")
     }
     token := parts[1]
+		row.Token = token 
+		err := DB.QueryRow("SELECT id, username from USERS WHERE TOKEN = ?", token).Scan(&row.ID, &row.Name)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return row, errors.New("invalid token")
+			}
+			return row, errors.New("db error during euth service")
 
-    deviceName, ok := tokenMap[token]
-    if !ok {
-        return "", errors.New("invalid token")
-    }
-    return deviceName, nil
+		}
+		return row, nil
+		
+    
 }
 
 func devInit() {
@@ -107,56 +118,15 @@ func devInit() {
 		fmt.Println("files reset")
 }
 
-func refreshUsers() {
-	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
-		log.Fatalf("create save dir: %v", err)
-	}
-
-	data, err := os.ReadFile(appConfig.TokensFile)
-	
-	rows, err = DB.Query("SELECT token, username FROM users;")
-	defer rows.Close()
-	if err == sql.ErrNoRows {
-		
-		fmt.Println("no users found")
-		return
-	} else {
-		log.Fatal("error accessing db")
-	}
-
-	tokenMap = make(map[string]string)
-	for rows.Next() {
-		
-	}
-
-
-	// for _, name := range tokenMap {
-	// 	dir := filepath.Join(appConfig.SaveDir, name)
-	// 	if err := os.MkdirAll(dir, 0o755); err != nil {
-	// 		log.Printf("create inbox %s: %v", dir, err)
-	// 		continue
-	// 	}
-	// 	for _, f := range []string{"links.json", "files.json"} {2
-	// 		p := filepath.Join(dir, f)
-	// 		if _, err := os.Stat(p); os.IsNotExist(err) {
-	// 			os.WriteFile(p, []byte("[]"), 0o644)
-	// 		}
-	// 	}
-	// }
-}
-
 func mainInit() {
 	
 	appConfig.MaxFormSize = 50 << 20 
-	appConfig.TokensFile = "data/devices.json"
-	appConfig.SaveDir = "data/inbox"
+	appConfig.SaveDir = "data"
 	appConfig.Password = "123"
 
-
-	refreshPaths()
-	
-
-	// devInit()
+	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
+    log.Fatalf("create save dir: %v", err)
+	}
 
 	
 }
@@ -300,6 +270,7 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, false, http.StatusInternalServerError, "failed adding new user to db")
 			return
 		}
+		// refreshUsers()
 		sendJSON(w, true, http.StatusOK, token)
 		return
 	} 
@@ -308,13 +279,15 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, false, http.StatusInternalServerError, "DB query to check if users contains login failed")
 		return
 	}
+
+	
 	
 	sendJSON(w, true, http.StatusOK, row.Token)
 	return 
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
-	senderName, err := authenticate(r)
+	sender, err := authenticate(r)
 	if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
     return
@@ -327,19 +300,26 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	link := r.FormValue("text")
-	receiver := filepath.Base(r.FormValue("receiver"))
+	receiver := r.FormValue("receiver")
 
 	if receiver == "" || receiver == "." || receiver == ".." {
     sendJSON(w, false, http.StatusBadRequest, "Invalid receiver")
     return
 	}
 
-	receiverPath := filepath.Join(appConfig.SaveDir, receiver) 
-	if err := os.MkdirAll(receiverPath, os.ModePerm); err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, "Failed to make upload path")		
+	var exists bool
+	if err = DB.QueryRow(
+    "SELECT EXISTS(SELECT 1 FROM users WHERE username = ?)",
+    receiver
+	).Scan(&exists); err!= nil {
+		sendJSON(w, false, http.StatusBadRequest, "No files selected")
 		return
 	}
-
+	if !exists {
+		sendJSON(w, false, http.StatusBadRequest, "No such receiver")
+		return
+	}
+	
 	files := r.MultipartForm.File["file"] 
 	if len(files) == 0 && len(link) == 0{
 		sendJSON(w, false, http.StatusBadRequest, "No files selected")
@@ -347,10 +327,10 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if link!= "" {
-
+		DB.exec("INSERT INTO items ()")
 		var linkData LinkMeta
 		linkData.Time = time.Now().Format("2006-01-02 15:04")
-		linkData.Sender = senderName
+		linkData.Sender = sender.Name
 		linkData.Url = link
 		linkData.ID = uuid.New().String()
 
@@ -399,7 +379,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		var metadata FileMeta
 		metadata.Name = filename
 		metadata.Time = time.Now().Format("2006-01-02 15:04")
-		metadata.Sender = senderName
+		metadata.Sender = sender.Name
 		metadata.Size = fileHeader.Size
 		metadata.ID = uuid.New().String()
 
@@ -447,54 +427,96 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
-	deviceName, err := authenticate(r)
+	device, err := authenticate(r)
 	if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
     return
 	}
 
-	n := make([]string, 0 ,len(tokenMap))
-	for _, name := range tokenMap {
-		if name != deviceName{
-			n = append(n, name)
-		}
+	var users []UserRecord
+	rows, err := DB.Query(
+		`SELECT id, username
+		FROM users
+		WHERE id != ?`,
+		device.ID,
+	)
+	if err!= nil {
+		sendJSON(w, false, http.StatusInternalServerError, "error when searching db")
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
 		
+		var u UserRecord
+		if err:= rows.Scan(&u.ID, &u.Name); err!= nil {
+			sendJSON(w, false, http.StatusInternalServerError, "error when iterating over db")
+			return
+		}
+		users = append(users, u)
+
 	}
 
-	sendJSON(w, true, http.StatusOK, n)
+	if rows.Err() != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "error when iterating over db")
+		return
+	}
+
+	sendJSON(w, true, http.StatusOK, users)
 }
 
 func handleFileList(w http.ResponseWriter, r *http.Request) {
-	deviceName, err := authenticate(r)
+	device, err := authenticate(r)
 	if err != nil {
 		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	baseDir := filepath.Join(appConfig.SaveDir, deviceName)
 
-	var files []FileMeta
-	filePath := filepath.Join(baseDir, "files.json")
-	if err := readOrCreateJSON(filePath, &files); err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, err.Error())
+	files := []FileRecord{}
+
+	rows, err := DB.Query(
+		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at
+		FROM items
+		WHERE receiver_id = ? AND consumed = FALSE`,
+		device.ID,
+	)
+	if err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "db query failed")
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var f FileRecord
+		if err := rows.Scan(
+			&f.ID,
+			&f.UUID,
+			&f.SenderID,
+			&f.ReceiverID,
+			&f.Type,
+			&f.Filename,
+			&f.Size,
+			&f.URL,
+			&f.UploadedAt,
+			&f.Consumed,
+			&f.ConsumedAt,
+		); err != nil {
+			log.Printf("scan item: %v", err)
+			continue
+		}
+		files = append(files, f)
+	}	
+
+	if err := rows.Err(); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "db iterate failed")
 		return
 	}
 
-	var links []LinkMeta
-	linkPath := filepath.Join(baseDir, "links.json")
-	if err := readOrCreateJSON(linkPath, &links); err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, err.Error())
-		return
-	}
-
-	ret := FullReturn{
-		Files: files,
-		Links: links,
-	}
-	sendJSON(w, true, http.StatusOK, ret)
+	sendJSON(w, true, http.StatusOK, files)
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-  sender, err := authenticate(r)
+  device, err := authenticate(r)
   if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
     return
@@ -507,7 +529,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
   }
 
   isFile := r.URL.Query().Get("isFile") == "true"
-  baseDir := filepath.Join(appConfig.SaveDir, sender)
+  baseDir := filepath.Join(appConfig.SaveDir, device.Name)
 
   if id == "all" {
     if isFile {
@@ -592,7 +614,7 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
-  sender, err := authenticate(r)
+  device, err := authenticate(r)
   if err != nil {
     sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
     return
@@ -604,7 +626,7 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
     return
   }
 
-  baseDir := filepath.Join(appConfig.SaveDir, sender)
+  baseDir := filepath.Join(appConfig.SaveDir, device.Name)
 
   metaPath := filepath.Join(baseDir, "files.json")
   entries, err := readFileMeta(metaPath)
@@ -644,17 +666,17 @@ func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
   newEntries, _ := filterFileMeta(entries, id)
   writeFileMeta(metaPath, newEntries)
 
-  fmt.Printf("File %s downloaded and deleted for %s\n", originalName, sender)
+  fmt.Printf("File %s downloaded and deleted for %s\n", originalName, device.Name)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
-
-	
-	mainInit()
 	InitDB("items.db")
 	defer DB.Close()
+	
+	mainInit()
+	
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)

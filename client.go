@@ -93,6 +93,34 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	return &out, nil
 }
 
+func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, error) {
+    var body bytes.Buffer
+    w := multipart.NewWriter(&body)
+
+    if filePath != "" {
+			f, err := os.Open(filePath)
+			if err != nil {
+				return nil, "", err
+			}
+			defer f.Close()
+
+			part, err := w.CreateFormFile("file", filepath.Base(filePath))
+			if err != nil {
+				return nil, "", err
+			}
+			if _, err := io.Copy(part, f); err != nil {
+				return nil, "", err
+			}
+    }
+
+    if link != "" {
+			w.WriteField("text", link)
+    }
+    w.WriteField("receiver", receiver)
+    w.Close()
+
+    return &body, w.FormDataContentType(), nil
+}
 
 
 func main() {
@@ -111,8 +139,8 @@ func main() {
 			in = strings.TrimSpace(in)
 			if in == "y"{
 
-				r,err := c.Send("POST", "auth",map[string]string{
-					"Name":"Name4",
+				r,err := c.Send("POST", "auth", map[string]string{
+					"Name":"Name7",
 					"Password": "123",
 				})
 				if err != nil {
@@ -152,7 +180,53 @@ func main() {
 
 			}else if in == "0"{
 				fmt.Println("exit")
-				return
+				returnf, err := os.Open(filePath)
+			if err != nil {
+					return nil, "", err
+			}
+			defer f.Close()
+
+			part, err := w.CreateFormFile("file", filepath.Base(filePath))
+			if err != nil {
+					return nil, "", err
+			}
+			if _, err := io.Copy(part, f); err != nil {
+					return nil, "", err
+			}
+			}else if in == "3"{
+				fmt.Println("receiver:path (1 space necessary)")
+				fileInfo := scan.ReadString('\n')
+				fileInfo = strings.TrimSpace(fileInfo)
+				reciever, _, path := strings.Cut(fileInfo, ":")
+
+				body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), strings.TrimSpace(path), "")
+				if err != nil {
+					fmt.Printf("error building file body for multipart %v")
+					continue
+				}
+
+				resp, err := c.Send("POST", "upload", body, contentType)
+				if err != nil { 
+					fmt.Printf("error uploading file %v", err)
+					continue
+				}
+			}else if in == "4"{
+				fmt.Println("receiver:link (1 space necessary)")
+				fileInfo := scan.ReadString('\n')
+				fileInfo = strings.TrimSpace(fileInfo)
+				rec, _, text := strings.Cut(fileInfo, ":")
+
+				body, contentType, err := buildUploadBody(strings.TrimSpace(rec),"", strings.TrimSpace(text))
+				if err != nil {
+					fmt.Printf("error building file body for multipart %v")
+					continue
+				}
+
+				resp, err := c.Send("POST", "upload", body, contentType)
+				if err != nil { 
+					fmt.Printf("error uploading file %v", err)
+					continue
+				}
 			}
 
 		}
