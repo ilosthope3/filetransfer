@@ -6,15 +6,12 @@ import (
 	"io"
 	"encoding/json"
 	"bytes"
-	// "errors"
 	"sort"
 	"os"
 	"strings"
 	"time"
 	"path/filepath"
 	"mime/multipart"
-	// "log"
-	// "github.com/joho/godotenv"
 )
 
 type ClientConfig struct {
@@ -63,25 +60,6 @@ func loadConfig() (ClientConfig, error) {
 	}
 	return cfg, nil
 }
-
-// func (c *Client) Init(){
-// 	// fmt.Println(os.Getenv("API_TOKEN"), "!!!!!!!!!!!!!!!!!")
-// 	conf, err := loadConfig()
-// 	if err!= nil {
-// 		fmt.Printf("Error loading config %v \n", err)
-// 		os.Exit(1)
-// 	}
-// 	c.Config = conf
-// 	c.Token = os.Getenv("API_TOKEN")
-// 	c.Client = http.Client{
-// 		Timeout: 5*time.Second,
-// 	}
-
-// 	// resp
-
-	
-// }
-
 
 func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	var reader io.Reader
@@ -348,56 +326,50 @@ func cmdDevices(c *Client, args []string) {
 	}
 }
 
-
 func cmdFiles(c *Client, args []string) {
-    r, err := c.Send("GET", "files", nil)
-    if err != nil {
-        fmt.Println("error:", err)
-        os.Exit(1)
-    }
-		fmt.Println(r)
-    listAny, ok := r.Data.([]any)
+	r, err := c.Send("GET", "files", nil)
+	if err != nil {
+		fmt.Println("error:", err)
+		os.Exit(1)
+	}
+	fmt.Println(r)
+	listAny, ok := r.Data.([]any)
+	if !ok {
+		fmt.Println("expected array, got", r.Data)
+		return
+	}
+
+	var list []map[string]any
+	for _, item := range listAny {
+		m, ok := item.(map[string]any)
 		if !ok {
-				fmt.Println("expected array, got", r.Data)
-				return
+			continue
 		}
+		list = append(list, m)
+	}
 
-		var list []map[string]any
-		for _, item := range listAny {
-				m, ok := item.(map[string]any)
-				if !ok {
-						continue
-				}
-				list = append(list, m)
+	if len(list) == 0 {
+		fmt.Println("Empty")
+		return
+	}
+
+	keys := make([]string, 0, len(list[0]))
+	for k := range list[0] {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		fmt.Printf("\t%s", k)
+	}
+	fmt.Println()
+
+	for _, row := range list {
+		for _, k := range keys {
+			fmt.Printf("\t%v", row[k])
 		}
-
-    if len(list) == 0 {
-        fmt.Println("Empty")
-        return
-    }
-
-    // 1. Extract keys from the first row
-    keys := make([]string, 0, len(list[0]))
-    for k := range list[0] {
-        keys = append(keys, k)
-    }
-
-    // 2. Sort them (deterministic order)
-    sort.Strings(keys)
-
-    // 3. Print header
-    for _, k := range keys {
-        fmt.Printf("\t%s", k)
-    }
-    fmt.Println()
-
-    // 4. Print each row in the SAME key order
-    for _, row := range list {
-        for _, k := range keys {
-            fmt.Printf("\t%v", row[k])
-        }
-        fmt.Println()
-    }
+		fmt.Println()
+	}
 }
 
 func cmdWho(c *Client, args []string) {

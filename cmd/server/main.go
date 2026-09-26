@@ -631,5 +631,4 @@ func main() {
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/download-and-delete", handleDownloadAndDelete)
 	http.ListenAndServe(":7842", nil)
-
 }
