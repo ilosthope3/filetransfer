@@ -12,6 +12,8 @@ import (
 	"time"
 	"path/filepath"
 	"mime/multipart"
+	"errors"
+	"mime"
 )
 
 type ClientConfig struct {
@@ -44,21 +46,31 @@ func (a APIResponse) String() string {
 
 }
 
-func loadConfig() (ClientConfig, error) {
-	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".filetransfer", "config.json")
-	
+func defaultConfig() ClientConfig {
+  return ClientConfig{
+    Server:              "http://localhost:7842/",
+    TimeoutSeconds:      5,
+    SaveDir:             "~/Downloads/filetransfer",
+    AutoDownload:        true,
+    PollIntervalSeconds: 30,
+  }
+}
 
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return ClientConfig{}, fmt.Errorf("read config: %w", err)
-	}
+func saveConfig(path string, cfg ClientConfig) error {
+  b, err := json.MarshalIndent(cfg, "", "  ")
+  if err != nil {
+    return err
+  }
+  return os.WriteFile(path, b, 0o644)
+}
 
-	var cfg ClientConfig
-	if err := json.Unmarshal(b, &cfg); err != nil {
-		return ClientConfig{}, fmt.Errorf("parse config: %w", err)
-	}
-	return cfg, nil
+func expandHome(p string) string {
+  if strings.HasPrefix(p, "~/") {
+    if home, err := os.UserHomeDir(); err == nil {
+      return filepath.Join(home, p[2:])
+    }
+  }
+  return p
 }
 
 func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
@@ -84,9 +96,9 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	if data != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.Token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.Token)
-	}
+	
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -124,6 +136,70 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader) (*API
 	return &out, nil
 }
 
+func (c *Client) Download(id string) error {
+  req, err := http.NewRequest("POST", c.Config.Server+"download?id="+id, nil)
+  if err != nil {
+    return err
+  }
+  req.Header.Set("Authorization", "Bearer "+c.Token)
+
+  resp, err := c.Client.Do(req)
+  if err != nil {
+    return err
+  }
+  defer resp.Body.Close()
+
+  if resp.StatusCode != http.StatusOK {
+    body, _ := io.ReadAll(resp.Body)
+    return fmt.Errorf("server %d: %s", resp.StatusCode, body)
+  }
+	
+	cd := resp.Header.Get("Content-Disposition")
+	if cd == "" {
+		return fmt.Errorf("server sent no Content-Disposition")
+	}
+	_, params, err := mime.ParseMediaType(cd)
+	if err != nil {
+		return fmt.Errorf("bad Content-Disposition %q: %w", cd, err)
+	}
+	name := params["filename"]
+	if name == "" {
+		return fmt.Errorf("no filename in %q", cd)
+	}
+	name = filepath.Base(name)
+
+	base := strings.TrimSuffix(name, filepath.Ext(name))
+	ext  := filepath.Ext(name)
+
+	dest := filepath.Join(c.Config.SaveDir, name)
+	for i := 1; ; i++ {
+		_, err := os.Stat(dest)
+		if os.IsNotExist(err) {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("stat %s: %w", dest, err)
+		}
+		dest = filepath.Join(c.Config.SaveDir,
+			fmt.Sprintf("%s (%d)%s", base, i, ext))
+	}
+	
+  out, err := os.Create(dest)
+  if err != nil {
+    return err
+  }
+  defer out.Close()
+
+  n, err := io.Copy(out, resp.Body)
+  if err != nil {
+    return err
+  }
+  if resp.ContentLength >= 0 && n != resp.ContentLength {
+    return fmt.Errorf("short read: %d/%d", n, resp.ContentLength)
+  }
+  return out.Close()
+}
+
 func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, error) {
     var body bytes.Buffer
     w := multipart.NewWriter(&body)
@@ -154,60 +230,78 @@ func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, er
 }
 
 func (c *Client) Init() {
-	home, _ := os.UserHomeDir()
-	dir := filepath.Join(home, ".filetransfer")
+  home, err := os.UserHomeDir()
+  if err != nil {
+    fmt.Println("failed to find home dir:", err)
+    os.Exit(1)
+  }
+  dir := filepath.Join(home, ".filetransfer")
 
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		fmt.Println("failed to create app dir:", err)
-		os.Exit(1)
-	}
+  if err := os.MkdirAll(dir, 0o700); err != nil {
+    fmt.Println("failed to create app dir:", err)
+    os.Exit(1)
+  }
 
-	cfgPath := filepath.Join(dir, "config.json")
-	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-		defaultCfg := ClientConfig{
-			Server:              "http://localhost:7842/",
-			TimeoutSeconds:      5,
-			SaveDir:             filepath.Join(dir, "downloads"),
-			AutoDownload:        false,
-			PollIntervalSeconds: 30,
-		}
-		b, _ := json.MarshalIndent(defaultCfg, "", "  ")
-		if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
-			fmt.Println("failed to write default config:", err)
-			os.Exit(1)
-		}
-	}
+  cfgPath := filepath.Join(dir, "client_config.json")
+  if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+    defaultCfg := ClientConfig{
+      Server:              "http://localhost:7842/",
+      TimeoutSeconds:      5,
+      SaveDir:             "~/Downloads/filetransfer",
+      AutoDownload:        false,
+      PollIntervalSeconds: 30,
+    }
+    b, _ := json.MarshalIndent(defaultCfg, "", "  ")
+    if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
+      fmt.Println("failed to write default config:", err)
+      os.Exit(1)
+    }
+  }
 
-	tokPath := filepath.Join(dir, "token")
-	if _, err := os.Stat(tokPath); os.IsNotExist(err) {
-		if err := os.WriteFile(tokPath, []byte{}, 0o600); err != nil {
-			fmt.Println("failed to create token file:", err)
-			os.Exit(1)
-		}
-	}
+  tokPath := filepath.Join(dir, "token")
+  if _, err := os.Stat(tokPath); os.IsNotExist(err) {
+    if err := os.WriteFile(tokPath, []byte{}, 0o600); err != nil {
+      fmt.Println("failed to create token file:", err)
+      os.Exit(1)
+    }
+  }
 
-	b, err := os.ReadFile(cfgPath)
-	if err != nil {
-		fmt.Println("failed to read config:", err)
-		os.Exit(1)
-	}
-	if err := json.Unmarshal(b, &c.Config); err != nil {
-		fmt.Println("failed to parse config:", err)
-		os.Exit(1)
-	}
+  b, err := os.ReadFile(cfgPath)
+  if err != nil {
+    fmt.Println("failed to read config:", err)
+    os.Exit(1)
+  }
+  if err := json.Unmarshal(b, &c.Config); err != nil {
+    fmt.Println("failed to parse config:", err)
+    os.Exit(1)
+  }
 
-	c.Token = os.Getenv("API_TOKEN")
-	if c.Token == "" {
-		if tb, err := os.ReadFile(tokPath); err == nil {
-			c.Token = strings.TrimSpace(string(tb))
-		}
-	}
+  if strings.HasPrefix(c.Config.SaveDir, "~/") {
+    c.Config.SaveDir = filepath.Join(home, c.Config.SaveDir[2:])
+  }
 
-	timeout := time.Duration(c.Config.TimeoutSeconds) * time.Second
-	if timeout == 0 {
-		timeout = 5 * time.Second
-	}
-	c.Client = http.Client{Timeout: timeout}
+  if err := os.MkdirAll(c.Config.SaveDir, 0o755); err != nil {
+    fmt.Println("failed to create save dir:", err)
+    os.Exit(1)
+  }
+
+  if c.Config.Server == "" {
+    fmt.Println("config: server is empty")
+    os.Exit(1)
+  }
+
+  c.Token = os.Getenv("API_TOKEN")
+  if c.Token == "" {
+    if tb, err := os.ReadFile(tokPath); err == nil {
+      c.Token = strings.TrimSpace(string(tb))
+    }
+  }
+
+  timeout := time.Duration(c.Config.TimeoutSeconds) * time.Second
+  if timeout == 0 {
+    timeout = 5 * time.Second
+  }
+  c.Client = http.Client{Timeout: timeout}
 }
 
 func saveToken(token string) error {
@@ -244,6 +338,8 @@ func main() {
 		cmdLink(&c, args)
 	case "whoami":
 		cmdWho(&c, args)
+	case "download":
+		cmdDownload(&c, args)
 	default:
 		fmt.Printf("unknown command: %s\n\n", cmd)
 		usage()
@@ -326,17 +422,15 @@ func cmdDevices(c *Client, args []string) {
 	}
 }
 
-func cmdFiles(c *Client, args []string) {
+func getFiles(c *Client) ([]map[string]any, error) {
 	r, err := c.Send("GET", "files", nil)
 	if err != nil {
-		fmt.Println("error:", err)
-		os.Exit(1)
+		return nil, err
 	}
 	fmt.Println(r)
 	listAny, ok := r.Data.([]any)
 	if !ok {
-		fmt.Println("expected array, got", r.Data)
-		return
+		return nil, errors.New("unexpected file type")
 	}
 
 	var list []map[string]any
@@ -347,7 +441,18 @@ func cmdFiles(c *Client, args []string) {
 		}
 		list = append(list, m)
 	}
+	return list, nil
+}
 
+func cmdFiles(c *Client, args []string) {
+
+
+	list, err := getFiles(c)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		return
+	}
+	
 	if len(list) == 0 {
 		fmt.Println("Empty")
 		return
@@ -455,4 +560,43 @@ func cmdLink(c *Client, args []string) {
 	} else {
 		fmt.Printf("Error when sending text: %v\n", resp.Error)
 	}
+}
+
+func cmdDownload(c *Client, args []string) {
+  if len(args) == 0 {
+    fmt.Println("download all|<fileID> [<fileID> ...]")
+    return
+  }
+
+  var fileIDs []string
+  if args[0] == "all" {
+    files, err := getFiles(c)
+    if err != nil {
+      fmt.Println("error:", err)
+      return
+    }
+    for _, f := range files {
+      if id, ok := f["id"].(string); ok {
+        fileIDs = append(fileIDs, id)
+      }
+    }
+  } else {
+    fileIDs = args
+  }
+
+  for _, id := range fileIDs {
+    if err := c.Download(id); err != nil {
+      fmt.Printf("ID %s\terror: %v\n", id, err)
+      continue
+    }
+    if resp, err := c.Send("POST", "delete?id="+id, nil); err!= nil{
+      fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
+      continue
+    } else if !resp.Success {
+			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, resp.Error)
+      continue
+		}
+		
+    fmt.Printf("ID %s\tOK\n", id)
+  }
 }

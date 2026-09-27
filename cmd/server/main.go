@@ -462,158 +462,95 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-	device, err := authenticate(r)
-	if err != nil {
-		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
-		return
-	}
+  device, err := authenticate(r)
+  if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+    return
+  }
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
-		return
-	}
+  id := r.URL.Query().Get("id")
+  if id == "" {
+    sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
+    return
+  }
 
-	isFile := r.URL.Query().Get("isFile") == "true"
-	baseDir := filepath.Join(appConfig.SaveDir, device.Name)
+  var res sql.Result
+  if id == "all" {
+    res, err = DB.Exec(
+      `UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND consumed = FALSE`,
+      time.Now(), device.ID,
+    )
+  } else {
+    res, err = DB.Exec(
+      `UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND id = ? AND consumed = FALSE`,
+      time.Now(), device.ID, id,
+    )
+  }
+  if err != nil {
+    fmt.Println("delete update failed:", err)
+    sendJSON(w, false, http.StatusInternalServerError, "db update failed")
+    return
+  }
 
-	if id == "all" {
-		if isFile {
-			entries, err := os.ReadDir(baseDir)
-			if err != nil {
-				sendJSON(w, false, http.StatusInternalServerError, "failed to read directory")
-				return
-			}
-			for _, entry := range entries {
-				if entry.IsDir() {
-					continue
-				}
-				if entry.Name() == "links.json" {
-					continue
-				}
-				if err := os.Remove(filepath.Join(baseDir, entry.Name())); err != nil {
-					fmt.Printf("could not delete %s: %v\n", entry.Name(), err)
-				}
-			}
-			os.Remove(filepath.Join(baseDir, "files.json"))
-			sendJSON(w, true, http.StatusOK, "all files deleted")
-			return
-		} else {
-			if err := os.Remove(filepath.Join(baseDir, "links.json")); err != nil && !os.IsNotExist(err) {
-				sendJSON(w, false, http.StatusInternalServerError, "failed to delete links.json")
-				return
-			}
-			sendJSON(w, true, http.StatusOK, "links deleted")
-			return
-		}
-	}
-
-	if isFile {
-		filePath := filepath.Join(baseDir, id)
-		if err := os.Remove(filePath); err != nil && !os.IsNotExist(err) {
-			sendJSON(w, false, http.StatusInternalServerError, "failed to delete physical file")
-			return
-		}
-
-		metaPath := filepath.Join(baseDir, "files.json")
-		entries, err := readFileMeta(metaPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				sendJSON(w, false, http.StatusNotFound, "no metadata file")
-			} else {
-				sendJSON(w, false, http.StatusInternalServerError, "failed to read metadata")
-			}
-			return
-		}
-		newEntries, found := filterFileMeta(entries, id)
-		if !found {
-			sendJSON(w, false, http.StatusBadRequest, "ID not found in metadata")
-			return
-		}
-		if err := writeFileMeta(metaPath, newEntries); err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "failed to write metadata")
-			return
-		}
-	} else {
-		metaPath := filepath.Join(baseDir, "links.json")
-		entries, err := readLinkMeta(metaPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				sendJSON(w, false, http.StatusNotFound, "no links file")
-			} else {
-				sendJSON(w, false, http.StatusInternalServerError, "failed to read links")
-			}
-			return
-		}
-		newEntries, found := filterLinkMeta(entries, id)
-		if !found {
-			sendJSON(w, false, http.StatusBadRequest, "ID not found in links")
-			return
-		}
-		if err := writeLinkMeta(metaPath, newEntries); err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "failed to write links")
-			return
-		}
-	}
-
-	sendJSON(w, true, http.StatusOK, "deleted successfully")
+  n, _ := res.RowsAffected()
+  sendJSON(w, true, http.StatusOK, fmt.Sprintf("marked %d item(s) consumed", n))
 }
 
-func handleDownloadAndDelete(w http.ResponseWriter, r *http.Request) {
-	device, err := authenticate(r)
-	if err != nil {
-		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
-		return
+func handleDownload(w http.ResponseWriter, r *http.Request) {
+  device, err := authenticate(r)
+  if err != nil {
+    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+    return
+  }
+
+  id := r.URL.Query().Get("id")
+  if id == "" {
+    sendJSON(w, false, http.StatusBadRequest, "missing id")
+    return
+  }
+
+  var f FileRecord
+  err = DB.QueryRow(
+    `SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at
+     FROM items
+     WHERE receiver_id = ? AND consumed = FALSE AND id = ?`,
+    device.ID, id,
+  ).Scan(&f.ID, &f.UUID, &f.SenderID, &f.ReceiverID, &f.Type,
+    &f.Filename, &f.Size, &f.URL, &f.UploadedAt, &f.Consumed, &f.ConsumedAt)
+  if err != nil {
+    if err == sql.ErrNoRows {
+      sendJSON(w, false, http.StatusBadRequest, "no such id found")
+      return
+    }
+    sendJSON(w, false, http.StatusInternalServerError, "db error during euth service")
+    return
+  }
+
+  if f.Type == "link" {
+    sendJSON(w, true, http.StatusOK, f.URL)
+    return
+  }
+
+  filePath := filepath.Join(appConfig.SaveDir, f.UUID)
+  file, err := os.Open(filePath)
+  if err != nil {
+    sendJSON(w, false, http.StatusNotFound, "file not found on disk")
+    return
+  }
+  defer file.Close()
+
+	filenameDeref := f.UUID
+	if f.Filename != nil {
+		filenameDeref = *f.Filename
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
-		sendJSON(w, false, http.StatusBadRequest, "missing id")
-		return
-	}
-
-	baseDir := filepath.Join(appConfig.SaveDir, device.Name)
-
-	metaPath := filepath.Join(baseDir, "files.json")
-	entries, err := readFileMeta(metaPath)
-	if err != nil {
-		sendJSON(w, false, http.StatusInternalServerError, "failed to read metadata")
-		return
-	}
-
-	var originalName string
-	found := false
-	for _, entry := range entries {
-		if entry.ID == id {
-			originalName = entry.Name
-			found = true
-			break
-		}
-	}
-	if !found {
-		sendJSON(w, false, http.StatusNotFound, "file not found")
-		return
-	}
-
-	filePath := filepath.Join(baseDir, id)
-	file, err := os.Open(filePath)
-	if err != nil {
-		sendJSON(w, false, http.StatusNotFound, "file not found on disk")
-		return
-	}
-	defer file.Close()
-
-	w.Header().Set("Content-Disposition", "attachment; filename=\""+originalName+"\"")
+  safe := strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(filenameDeref)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+safe+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
-	http.ServeContent(w, r, originalName, time.Now(), file)
-
-	os.Remove(filePath)
-
-	newEntries, _ := filterFileMeta(entries, id)
-	writeFileMeta(metaPath, newEntries)
-
-	fmt.Printf("File %s downloaded and deleted for %s\n", originalName, device.Name)
+	http.ServeContent(w, r, filenameDeref, time.Now(), file)
+  fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
 }
+
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -629,6 +566,6 @@ func main() {
 	http.HandleFunc("/devices", handleDeviceNames)
 	http.HandleFunc("/files", handleFileList)
 	http.HandleFunc("/delete", handleDelete)
-	http.HandleFunc("/download-and-delete", handleDownloadAndDelete)
+	http.HandleFunc("/download", handleDownload)
 	http.ListenAndServe(":7842", nil)
 }
