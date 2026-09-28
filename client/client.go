@@ -46,32 +46,7 @@ func (a APIResponse) String() string {
 
 }
 
-func defaultConfig() ClientConfig {
-  return ClientConfig{
-    Server:              "http://localhost:7842/",
-    TimeoutSeconds:      5,
-    SaveDir:             "~/Downloads/filetransfer",
-    AutoDownload:        true,
-    PollIntervalSeconds: 30,
-  }
-}
-
-func saveConfig(path string, cfg ClientConfig) error {
-  b, err := json.MarshalIndent(cfg, "", "  ")
-  if err != nil {
-    return err
-  }
-  return os.WriteFile(path, b, 0o644)
-}
-
-func expandHome(p string) string {
-  if strings.HasPrefix(p, "~/") {
-    if home, err := os.UserHomeDir(); err == nil {
-      return filepath.Join(home, p[2:])
-    }
-  }
-  return p
-}
+////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	var reader io.Reader
@@ -200,35 +175,6 @@ func (c *Client) Download(id string) error {
   return out.Close()
 }
 
-func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, error) {
-    var body bytes.Buffer
-    w := multipart.NewWriter(&body)
-
-    if filePath != "" {
-			f, err := os.Open(filePath)
-			if err != nil {
-				return nil, "", err
-			}
-			defer f.Close()
-
-			part, err := w.CreateFormFile("file", filepath.Base(filePath))
-			if err != nil {
-				return nil, "", err
-			}
-			if _, err := io.Copy(part, f); err != nil {
-				return nil, "", err
-			}
-    }
-
-    if link != "" {
-			w.WriteField("text", link)
-    }
-    w.WriteField("receiver", receiver)
-    w.Close()
-
-    return &body, w.FormDataContentType(), nil
-}
-
 func (c *Client) Init() {
   home, err := os.UserHomeDir()
   if err != nil {
@@ -251,12 +197,17 @@ func (c *Client) Init() {
       AutoDownload:        false,
       PollIntervalSeconds: 30,
     }
-    b, _ := json.MarshalIndent(defaultCfg, "", "  ")
-    if err := os.WriteFile(cfgPath, b, 0o600); err != nil {
-      fmt.Println("failed to write default config:", err)
-      os.Exit(1)
-    }
+    err := saveConfig(defaultCfg)
+		if err != nil {
+			fmt.Println("error writing default cfg")
+			os.Exit(1)
+		}
   }
+	if err := c.loadConfig(); err != nil {
+		fmt.Printf("Fatal: %v", err)
+		os.Exit(1)
+	}
+
 
   tokPath := filepath.Join(dir, "token")
   if _, err := os.Stat(tokPath); os.IsNotExist(err) {
@@ -265,37 +216,10 @@ func (c *Client) Init() {
       os.Exit(1)
     }
   }
-
-  b, err := os.ReadFile(cfgPath)
-  if err != nil {
-    fmt.Println("failed to read config:", err)
-    os.Exit(1)
-  }
-  if err := json.Unmarshal(b, &c.Config); err != nil {
-    fmt.Println("failed to parse config:", err)
-    os.Exit(1)
-  }
-
-  if strings.HasPrefix(c.Config.SaveDir, "~/") {
-    c.Config.SaveDir = filepath.Join(home, c.Config.SaveDir[2:])
-  }
-
-  if err := os.MkdirAll(c.Config.SaveDir, 0o755); err != nil {
-    fmt.Println("failed to create save dir:", err)
-    os.Exit(1)
-  }
-
-  if c.Config.Server == "" {
-    fmt.Println("config: server is empty")
-    os.Exit(1)
-  }
-
-  c.Token = os.Getenv("API_TOKEN")
-  if c.Token == "" {
-    if tb, err := os.ReadFile(tokPath); err == nil {
-      c.Token = strings.TrimSpace(string(tb))
-    }
-  }
+  
+	if tb, err := os.ReadFile(tokPath); err == nil {
+		c.Token = strings.TrimSpace(string(tb))
+	}
 
   timeout := time.Duration(c.Config.TimeoutSeconds) * time.Second
   if timeout == 0 {
@@ -304,11 +228,111 @@ func (c *Client) Init() {
   c.Client = http.Client{Timeout: timeout}
 }
 
+func (c *Client) loadConfig() error {
+	home, err := os.UserHomeDir()
+  if err != nil {
+    fmt.Println("failed to find home dir:", err)
+    os.Exit(1)
+  }
+  cfgPath := filepath.Join(home, ".filetransfer", "client_config.json")
+
+	b, err := os.ReadFile(cfgPath)
+  if err != nil {
+    return err
+  }
+  if err := json.Unmarshal(b, &c.Config); err != nil {
+    return err
+  }
+
+  if strings.HasPrefix(c.Config.SaveDir, "~/") {
+    c.Config.SaveDir = filepath.Join(home, c.Config.SaveDir[2:])
+  }
+
+  if err := os.MkdirAll(c.Config.SaveDir, 0o755); err != nil {
+    return err
+  }
+
+  if c.Config.Server == "" {
+    return err
+  }
+	return nil
+}
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+func saveConfig(cfg ClientConfig) error {
+  home, err := os.UserHomeDir()
+  if err != nil {
+    return err
+  }
+  path := filepath.Join(home, ".filetransfer", "client_config.json")
+  b, err := json.MarshalIndent(cfg, "", "  ")
+  if err != nil {
+    return err
+  }
+  return os.WriteFile(path, b, 0o600)
+}
+
 func saveToken(token string) error {
 	home, _ := os.UserHomeDir()
 	path := filepath.Join(home, ".filetransfer", "token")
 	return os.WriteFile(path, []byte(token), 0o600)
 }
+
+//////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+func getFiles(c *Client) ([]map[string]any, error) {
+	r, err := c.Send("GET", "files", nil)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(r)
+	listAny, ok := r.Data.([]any)
+	if !ok {
+		return nil, errors.New("unexpected file type")
+	}
+
+	var list []map[string]any
+	for _, item := range listAny {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		list = append(list, m)
+	}
+	return list, nil
+}
+
+func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, error) {
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+
+	if filePath != "" {
+		f, err := os.Open(filePath)
+		if err != nil {
+			return nil, "", err
+		}
+		defer f.Close()
+
+		part, err := w.CreateFormFile("file", filepath.Base(filePath))
+		if err != nil {
+			return nil, "", err
+		}
+		if _, err := io.Copy(part, f); err != nil {
+			return nil, "", err
+		}
+	}
+
+	if link != "" {
+		w.WriteField("text", link)
+	}
+	w.WriteField("receiver", receiver)
+	w.Close()
+
+	return &body, w.FormDataContentType(), nil
+}
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
 	
@@ -317,7 +341,7 @@ func main() {
 	c.Init()
 
 	if len(os.Args) < 2 {
-		usage()
+		cmdHelp()
 		os.Exit(1)
 	}
 
@@ -327,7 +351,6 @@ func main() {
 	switch cmd {
 	case "auth":
 		cmdAuth(&c, args)
-		usage()
 	case "devices":
 		cmdDevices(&c, args)
 	case "inbox":
@@ -340,23 +363,31 @@ func main() {
 		cmdWho(&c, args)
 	case "download":
 		cmdDownload(&c, args)
+	case "cfg":
+		cmdEditCFG(&c, args)
+	case "delete":
+		cmdDelete(&c, args)
 	default:
 		fmt.Printf("unknown command: %s\n\n", cmd)
-		usage()
+		cmdHelp()
 		os.Exit(1)
 	}
 }
 
-func usage() {
+func cmdHelp() {
 	fmt.Println(`usage: filetransfer <command> [args]
 
 	commands:
   auth <name> <password>     authenticate and get a token
   devices                    list registered devices
   inbox                      list pending files/text
+  download all|<id> [<id>]   download files/text
+  delete all|<id> [<id>]     delete files/text
   file <receiver>:<path>     send a file
   text <receiver>:<url>      send a link
-  whoami                     currently logged in as which user`)
+  whoami                     currently logged in as which user
+  cfg                        shows current config and path
+	help                       this menu`)
 }
 
 func cmdAuth(c *Client, args []string) (string, string, error) {
@@ -420,28 +451,6 @@ func cmdDevices(c *Client, args []string) {
 	for _, d := range devices {
 		fmt.Printf("\t%v\t%v\n", d.ID, d.Name)
 	}
-}
-
-func getFiles(c *Client) ([]map[string]any, error) {
-	r, err := c.Send("GET", "files", nil)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Println(r)
-	listAny, ok := r.Data.([]any)
-	if !ok {
-		return nil, errors.New("unexpected file type")
-	}
-
-	var list []map[string]any
-	for _, item := range listAny {
-		m, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
-		list = append(list, m)
-	}
-	return list, nil
 }
 
 func cmdFiles(c *Client, args []string) {
@@ -589,7 +598,7 @@ func cmdDownload(c *Client, args []string) {
       fmt.Printf("ID %s\terror: %v\n", id, err)
       continue
     }
-    if resp, err := c.Send("POST", "delete?id="+id, nil); err!= nil{
+    if resp, err := c.Send("DELETE", "delete?id="+id, nil); err!= nil{
       fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
       continue
     } else if !resp.Success {
@@ -599,4 +608,56 @@ func cmdDownload(c *Client, args []string) {
 		
     fmt.Printf("ID %s\tOK\n", id)
   }
+}
+
+func cmdDelete(c *Client, args []string) {
+	if len(args) == 0 {
+    fmt.Println("delete all|<fileID> [<fileID> ...]")
+    return
+  }
+
+	var fileIDs []string
+  if args[0] == "all" {
+    files, err := getFiles(c)
+    if err != nil {
+      fmt.Println("error:", err)
+      return
+    }
+    for _, f := range files {
+      if id, ok := f["id"].(string); ok {
+        fileIDs = append(fileIDs, id)
+      }
+    }
+  } else {
+    fileIDs = args
+  }
+	for _, id := range fileIDs {
+		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err!= nil{
+			fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
+			continue
+		} else if !resp.Success {
+			fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
+			continue
+		}
+		
+		fmt.Printf("ID %s\tdeleted\n", id)
+	}
+
+}
+
+func cmdEditCFG(c *Client, args []string) {
+  b, err := json.MarshalIndent(c.Config, "", "  ")
+  if err != nil {
+    fmt.Println("error:", err)
+    return
+  }
+
+	home, err := os.UserHomeDir()
+  if err != nil {
+    fmt.Println("failed to find home dir:", err)
+    os.Exit(1)
+  }
+  path := filepath.Join(home, ".filetransfer", "client_config.json")
+  fmt.Println("\n\nCONFIG PATH:", path)
+  fmt.Println(string(b))
 }
