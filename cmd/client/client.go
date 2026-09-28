@@ -286,7 +286,7 @@ func getFiles(c *Client) ([]map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(r)
+	// fmt.Println(r)
 	listAny, ok := r.Data.([]any)
 	if !ok {
 		return nil, errors.New("unexpected file type")
@@ -335,8 +335,6 @@ func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, er
 /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
-	
-
 	var c Client
 	c.Init()
 
@@ -348,7 +346,7 @@ func main() {
 	cmd := os.Args[1]
 	args := os.Args[2:]
 
-	switch cmd {
+	switch strings.ToLower(cmd) {
 	case "auth":
 		cmdAuth(&c, args)
 	case "devices":
@@ -367,32 +365,34 @@ func main() {
 		cmdEditCFG(&c, args)
 	case "delete":
 		cmdDelete(&c, args)
+	case "deleteuser":
+		cmdDeleteUser(&c, args)
 	default:
-		fmt.Printf("unknown command: %s\n\n", cmd)
+		fmt.Printf("Unknown command: %s\n\n", cmd)
 		cmdHelp()
 		os.Exit(1)
 	}
 }
 
 func cmdHelp() {
-	fmt.Println(`usage: filetransfer <command> [args]
-
-	commands:
-  auth <name> <password>     authenticate and get a token
-  devices                    list registered devices
-  inbox                      list pending files/text
-  download all|<id> [<id>]   download files/text
-  delete all|<id> [<id>]     delete files/text
-  file <receiver>:<path>     send a file
-  text <receiver>:<url>      send a link
-  whoami                     currently logged in as which user
-  cfg                        shows current config and path
-	help                       this menu`)
+	fmt.Println(`  ./filetransfer <command> [args]
+  COMMANDS:
+    auth <name> <password>     authenticate and get a token
+    whoami                     currently logged in as which user
+    devices                    list registered devices
+    inbox                      list pending files/text
+    download all|<id> [<id>]   download files/text
+    delete all|<id> [<id>]     delete files/text
+    file <receiver>:<path>     send a file
+    text <receiver>:<url>      send a link
+    cfg                        current config and config path
+    help                       this menu`)
+	fmt.Println()
 }
 
-func cmdAuth(c *Client, args []string) (string, string, error) {
+func cmdAuth(c *Client, args []string) error {
 	if len(args) != 2 {
-		return "", "", fmt.Errorf("usage: filetransfer auth <name> <password>")
+		return fmt.Errorf("usage: filetransfer auth <name> <password>")
 	}
 
 	r, err := c.Send("POST", "auth", map[string]string{
@@ -400,26 +400,26 @@ func cmdAuth(c *Client, args []string) (string, string, error) {
 		"Password": args[1],
 	})
 	if err != nil {
-		return "", "", fmt.Errorf("auth request: %w", err)
+		return fmt.Errorf("auth request: %w", err)
 	}
 
 	token, ok := r.Data.(string)
 	if !ok || token == "" {
-		return "", "", fmt.Errorf("server returned unexpected data")
+		return fmt.Errorf("server returned unexpected data")
 	}
 
 	if err := saveToken(token); err != nil {
-		return "", "", fmt.Errorf("save token: %w", err)
+		return fmt.Errorf("save token: %w", err)
 	}
 
-	return args[0], token, nil
+	return nil
 }
 
 func cmdDevices(c *Client, args []string) {
 	r, err := c.Send("GET", "devices", nil)
 	if err != nil {
 		fmt.Println("error:", err)
-		os.Exit(1)
+		return
 	}
 	list, ok := r.Data.([]any)
 	if !ok {
@@ -443,19 +443,20 @@ func cmdDevices(c *Client, args []string) {
 		devices = append(devices, Device{ID: id, Name: name})
 	}
 
-	
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].ID < devices[j].ID
 	})
-	fmt.Println("\n\tID\tName")
+	
+	fmt.Println("\n  DEVICES:")
 	for _, d := range devices {
-		fmt.Printf("\t%v\t%v\n", d.ID, d.Name)
+		fmt.Printf("    [%v] %v\n", d.ID, d.Name)
 	}
+	fmt.Println()
 }
 
 func cmdFiles(c *Client, args []string) {
 
-
+	fmt.Println("\n  INBOX:")
 	list, err := getFiles(c)
 	if err != nil {
 		fmt.Printf("%v\n", err)
@@ -467,23 +468,28 @@ func cmdFiles(c *Client, args []string) {
 		return
 	}
 
-	keys := make([]string, 0, len(list[0]))
-	for k := range list[0] {
-		keys = append(keys, k)
+	truncate := func (s string, n int) string {
+		r := []rune(s)
+		if len(r) <= n {
+			return s
+		}
+		return string(r[:n-1]) + "…"
 	}
-	sort.Strings(keys)
-
-	for _, k := range keys {
-		fmt.Printf("\t%s", k)
-	}
-	fmt.Println()
 
 	for _, row := range list {
-		for _, k := range keys {
-			fmt.Printf("\t%v", row[k])
+		id := fmt.Sprintf("%v", row["id"])
+		sender := fmt.Sprintf("%v", row["sender_id"])
+		date := fmt.Sprintf("%v", row["uploaded_at"])
+
+		if t, _ := row["type"].(string); t == "link" {
+			text := fmt.Sprintf("%v", row["url"])
+			fmt.Printf("    [%s] T  %-60s  from %s  %s\n", id, truncate(text, 60), sender, date)
+		} else {
+			name := fmt.Sprintf("%v", row["filename"])
+			fmt.Printf("    [%s] F  %-60s  from %s  %s\n", id, truncate(name, 60), sender, date)
 		}
-		fmt.Println()
 	}
+	fmt.Println()
 }
 
 func cmdWho(c *Client, args []string) {
@@ -505,20 +511,20 @@ func cmdWho(c *Client, args []string) {
 	id, _ := dev["id"].(float64)
 	name, _ := dev["name"].(string)
 
-	fmt.Println("\n\tID\tName")
-	fmt.Printf("\n\t%v\t%v\n", id, name)
+	
+	fmt.Printf("\n  Logged in as [%v] - %v\n\n", id, name)
 	
 }
 
 func cmdSend(c *Client, args []string) {
 	if len(args) != 1 {
-		fmt.Println("usage: filetransfer send <receiver>:<path>")
+		fmt.Println("filetransfer send <receiver>:<path>")
 		os.Exit(1)
 	}
 
 	receiver, path, found := strings.Cut(args[0], ":")
 	if !found {
-		fmt.Println("format must be <receiver>:<path>")
+		fmt.Println("Format must be <receiver>:<path>")
 		os.Exit(1)
 	}
 
@@ -534,7 +540,7 @@ func cmdSend(c *Client, args []string) {
 		os.Exit(1)
 	}
 	if resp.Success {
-		fmt.Println("File sent successfully")
+		fmt.Println("OK")
 	} else {
 		fmt.Printf("Error when sending file: %v\n", resp.Error)
 	}
@@ -542,14 +548,14 @@ func cmdSend(c *Client, args []string) {
 
 func cmdLink(c *Client, args []string) {
 	if len(args) < 1 {
-		fmt.Println("usage: filetransfer link <receiver>:<url>")
+		fmt.Println("filetransfer link <receiver>:<url>")
 		os.Exit(1)
 	}
 	
 	inp := strings.Join(args, " ")
 	receiver, url, found := strings.Cut(inp, ":")
 	if !found {
-		fmt.Println("format must be <receiver>:<url>")
+		fmt.Println("Format must be <receiver>:<url>")
 		os.Exit(1)
 	}
 
@@ -565,7 +571,7 @@ func cmdLink(c *Client, args []string) {
 		os.Exit(1)
 	}
 	if resp.Success {
-		fmt.Println("Text sent successfully")
+		fmt.Println("OK")
 	} else {
 		fmt.Printf("Error when sending text: %v\n", resp.Error)
 	}
@@ -660,4 +666,21 @@ func cmdEditCFG(c *Client, args []string) {
   path := filepath.Join(home, ".filetransfer", "client_config.json")
   fmt.Println("\n\nCONFIG PATH:", path)
   fmt.Println(string(b))
+}
+
+func cmdDeleteUser(c *Client, args []string) {
+	if len(args) == 0 {
+		fmt.Println("deleteUser <id>")
+	}
+	id := args[0]
+	if resp, err := c.Send("DELETE", "delete-user?id="+id, nil); err!= nil{
+		fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
+		return
+	} else if !resp.Success {
+		fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
+		return
+	}
+	
+	fmt.Printf("ID %s\tdeleted\n", id)
+
 }

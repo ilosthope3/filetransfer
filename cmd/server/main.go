@@ -15,6 +15,10 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"strconv"
+	"context"
+	"syscall"
+	"os/signal"
 )
 
 type (
@@ -23,6 +27,8 @@ type (
 		SaveDir     string
 		MaxFormSize int64
 		Password    string
+		AllowCrossUserDelete bool
+		CleanIntervalMins int
 	}
 	APIResponse struct {
 		Success bool        `json:"success"`
@@ -117,10 +123,18 @@ func mainInit() {
 	appConfig.MaxFormSize = 50 << 20
 	appConfig.SaveDir = "data"
 	appConfig.Password = "123"
+	appConfig.AllowCrossUserDelete = true
+	appConfig.CleanIntervalMins = 30
+
 
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
 		log.Fatalf("create save dir: %v", err)
 	}
+
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)	
+	defer stop()
+	go cleanUpScheduler(ctx)
 
 }
 
@@ -208,6 +222,97 @@ func readOrCreateJSON(filePath string, v interface{}) error {
 	return nil
 }
 
+func cleanUpScheduler(ctx context.Context) {
+	cleanUp()
+	t:= time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <- ctx.Done():
+			return
+		case <- t.C:
+			err := cleanUp()
+			if err != nil {
+				fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
+			}
+		}
+	}
+}
+
+func cleanUp() error {
+	removeOrphanBlobs := func() (int, error) {
+		entries, err := os.ReadDir(appConfig.SaveDir)
+		if err != nil {
+			return 0, err
+		}
+
+		rows, err := DB.Query(`
+			SELECT uuid FROM items
+			WHERE consumed = FALSE
+				OR (consumed = TRUE AND consumed_at >= ?)
+		`, time.Now().Add(-24*time.Hour))
+		if err != nil && err != sql.ErrNoRows {
+			return 0, err
+		}
+		defer rows.Close()
+
+		keep := map[string]struct{}{}
+		for rows.Next() {
+			var u string
+			if err := rows.Scan(&u); err != nil {
+				continue
+			}
+			keep[u] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			return 0, err
+		}
+
+		removed := 0
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if _, ok := keep[e.Name()]; ok {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
+			}
+			if time.Since(info.ModTime()) < 10*time.Minute {
+				continue
+			}
+			p := filepath.Join(appConfig.SaveDir, e.Name())
+			if err := os.Remove(p); err != nil {
+				fmt.Printf("orphan remove %s: %v\n", p, err)
+				continue
+			}
+			removed++
+		}
+		return removed, nil
+	}
+
+
+	r, err := DB.Exec(`
+		DELETE FROM items
+		WHERE receiver_id NOT IN (SELECT id FROM users)
+	`)
+	if err != nil {
+		return err
+	}
+
+  orphans, err := removeOrphanBlobs()
+  if err != nil {
+    fmt.Println("orphan sweep:", err)
+		return err
+  }
+
+
+	n, _ := r.RowsAffected()
+  fmt.Printf("cleanup: rows=%d orphans=%d\n",n, orphans)
+  return nil
+}
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
@@ -496,6 +601,43 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
   sendJSON(w, true, http.StatusOK, fmt.Sprintf("marked %d item(s) consumed", n))
 }
 
+func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
+	device, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	s := r.URL.Query().Get("id")
+	id, err := strconv.Atoi(s)
+  if err != nil {
+    sendJSON(w, false, http.StatusBadRequest, "missing/invalid id parameter")
+    return
+  }
+		
+	if( !appConfig.AllowCrossUserDelete )&&( int64(id) != device.ID){
+		sendJSON(w, false, http.StatusBadRequest, "cross user delete disabled, input nd self ids do not match")
+		return
+	}
+
+	res, err := DB.Exec(`DELETE FROM users WHERE id = ?`, id)
+
+	if err != nil {
+		fmt.Println("delete update failed:", err)
+		sendJSON(w, false, http.StatusInternalServerError, "deleting user failed")
+		return
+	}
+
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		sendJSON(w, false, http.StatusBadRequest, fmt.Sprintf("no user with id %v",id))
+		return
+	}
+	sendJSON(w, true, http.StatusOK, fmt.Sprintf("deleted user %v",id))
+
+	
+}
+
 func handleDownload(w http.ResponseWriter, r *http.Request) {
   device, err := authenticate(r)
   if err != nil {
@@ -551,7 +693,6 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
   fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
 }
 
-
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
@@ -567,5 +708,6 @@ func main() {
 	http.HandleFunc("/files", handleFileList)
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/download", handleDownload)
+	http.HandleFunc("/delete-user", handleDeleteUser)
 	http.ListenAndServe(":7842", nil)
 }

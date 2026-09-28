@@ -65,10 +65,7 @@ coverage/
 /cypress/videos/
 /cypress/screenshots/
 
-# =====================================
-# APPLICATION DATA (NEVER COMMIT)
-# =====================================
-# User uploads and device database
+
 data/uploads/
 data/devices.json
 data/tokens.json
