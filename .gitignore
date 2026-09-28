@@ -11,6 +11,7 @@
 *.out
 
 data/
+items.db
 
 go.work
 go.work.sum
