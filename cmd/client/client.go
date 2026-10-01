@@ -37,6 +37,12 @@ type Client struct {
 	Config ClientConfig
 }
 
+type Dir struct {
+	Files []string `json:"files"`
+	DirName string `json:"name"`
+	Dirs []Dir		 `json:"dirs,omitempty"`
+}
+
 func (a APIResponse) String() string {
 	r, err := json.MarshalIndent(a, "", "  ")
 	if err != nil {
@@ -88,15 +94,16 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	return &out, nil
 }
 
-func (c *Client) SendRaw(method, path, contentType string, body io.Reader) (*APIResponse, error) {
+func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFlag bool) (*APIResponse, error) {
 	req, err := http.NewRequest(method, c.Config.Server+path, body)
 	if err != nil {
 			return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
 	if c.Token != "" {
-			req.Header.Set("Authorization", "Bearer "+c.Token)
+		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
+	req.Header.Set("Directory", strconv.FormatBool(dirFlag))
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -367,6 +374,8 @@ func main() {
 		cmdDelete(&c, args)
 	case "deleteuser":
 		cmdDeleteUser(&c, args)
+	case "dir":
+		cmdDir(&c, args)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", cmd)
 		cmdHelp()
@@ -385,6 +394,7 @@ func cmdHelp() {
     delete all|<id> [<id>]     delete files/text
     file <receiver>:<path>     send a file
     text <receiver>:<url>      send a link
+    dir  <reciever>:<path>     send a folder
     cfg                        current config and config path
     help                       this menu`)
 	fmt.Println()
@@ -516,6 +526,88 @@ func cmdWho(c *Client, args []string) {
 	
 }
 
+func cmdDir(c *Client, args []string) {
+	if len(args) != 1 {
+		fmt.Println("filetransfer dir <receiver>:<path>")
+		os.Exit(1)
+	}
+
+	receiver, path, found := strings.Cut(args[0], ":")
+	if !found {
+		fmt.Println("Format must be <receiver>:<path>")
+		os.Exit(1)
+	}
+
+	
+	f, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		fmt.Println("no such path found")
+		os.Exit(1)
+	}
+
+	if !f.IsDir() {
+		fmt.Println("path is a file: use file command")
+		os.Exit(1)
+	}
+
+	var traverseDir func(string) Dir
+	traverseDir = func(path string) Dir {
+
+		var r Dir
+		r.DirName = filepath.Base(path) // last folder name type shi
+		files, err := os.ReadDir(path)
+		if err != nil {
+			fmt.Printf("error reading dir: %s\n%v\n", path, err)
+			return r
+		}
+		r.Dirs = []Dir{}
+		r.Files = []string{}
+		
+		for _, item := range files{
+			if item.IsDir() {
+				r.Dirs = append(r.Dirs, traverseDir(filepath.Join(path, item.Name()))) //fix for actual dir
+			} else {
+				cpath := filepath.Join(path, item.Name())
+				body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), strings.TrimSpace(cpath), "")
+				if err != nil {
+					fmt.Printf("error building body: %s\n%v\n", cpath, err)
+					continue
+				}
+
+				resp, err := c.SendRaw("POST", "upload", contentType, body, false)
+				if err != nil {
+					fmt.Printf("error uploading: %s\n%v\n", cpath, err)
+					continue
+				}
+				if !resp.Success {
+					fmt.Printf("error: %s\n%v\n", cpath, resp.Error)
+					continue
+				}
+				
+				r.Files = append(r.Files, resp.Data.(string))
+				
+			}
+		}
+
+		if len(r.Dirs) == 0 {r.Dirs = nil}
+		if len(r.Files) == 0 {r.Files = nil}
+		return r
+	}
+
+	root := traverseDir(path)
+
+	data, err := json.Marshal(root)
+	if err != nil {
+		fmt.Printf("error creating manifest: %v\n", err)
+		os.Exit(1)
+	}
+
+	
+	//c.SendRaw need to change isdir flag to 3rd case of not, dirfile and dir 
+
+
+}
+
 func cmdSend(c *Client, args []string) {
 	if len(args) != 1 {
 		fmt.Println("filetransfer send <receiver>:<path>")
@@ -534,7 +626,7 @@ func cmdSend(c *Client, args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := c.SendRaw("POST", "upload", contentType, body)
+	resp, err := c.SendRaw("POST", "upload", contentType, body, false)
 	if err != nil {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
@@ -565,7 +657,7 @@ func cmdLink(c *Client, args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := c.SendRaw("POST", "upload", contentType, body)
+	resp, err := c.SendRaw("POST", "upload", contentType, body, false)
 	if err != nil {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
@@ -683,4 +775,17 @@ func cmdDeleteUser(c *Client, args []string) {
 	
 	fmt.Printf("ID %s\tdeleted\n", id)
 
+}
+
+func runDaemon(ctx context.Context, c *Client) {
+  t := time.NewTicker(interval)
+  defer t.Stop()
+  for {
+    select {
+    case <-ctx.Done():
+      return
+    case <-t.C:
+      cmdDownload(c, []string{"all"})
+    }
+  }
 }

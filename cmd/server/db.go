@@ -54,7 +54,8 @@ func InitDB(path string) {
     url            TEXT, 
     uploaded_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     consumed       BOOLEAN DEFAULT FALSE,
-    consumed_at    DATETIME
+    consumed_at    DATETIME,
+		is_dir         BOOLEAN DEFAULT FALSE
 	);`
 
 	if _, err := DB.Exec(schema); err != nil {

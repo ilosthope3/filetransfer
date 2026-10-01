@@ -1,7 +1,4 @@
-# =====================================
-# GO (Backend)
-# =====================================
-# Compiled binaries
+
 *.exe
 *.exe~
 *.dll
@@ -11,20 +8,13 @@
 *.out
 
 data/
-items.db
+*.db
 
 go.work
 go.work.sum
 
 node_modules/
 web/node_modules/
-
-
-dist/
-web/dist/
-dist-ssr/
-web/dist-ssr/
-*.tsbuildinfo
 
 # Logs
 logs/
@@ -35,7 +25,7 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-# Local environment files (secrets)
+# Local environment files
 .env
 .env.local
 .env.*.local
@@ -80,5 +70,9 @@ data/tokens.json
 *.bak
 *~
 
-
+#why u tryna look at that
 TODO.txt
+#binary
+filetransfer
+#testing sending txt files
+cmd/client/*.txt

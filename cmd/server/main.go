@@ -138,90 +138,6 @@ func mainInit() {
 
 }
 
-func readFileMeta(path string) ([]FileMeta, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var entries []FileMeta
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}
-
-func writeFileMeta(path string, entries []FileMeta) error {
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func readLinkMeta(path string) ([]LinkMeta, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var entries []LinkMeta
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, err
-	}
-	return entries, nil
-}
-
-func writeLinkMeta(path string, entries []LinkMeta) error {
-	data, err := json.MarshalIndent(entries, "", "  ")
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0644)
-}
-
-func filterFileMeta(entries []FileMeta, id string) ([]FileMeta, bool) {
-	found := false
-	result := []FileMeta{}
-	for _, e := range entries {
-		if e.ID == id {
-			found = true
-			continue
-		}
-		result = append(result, e)
-	}
-	return result, found
-}
-
-func filterLinkMeta(entries []LinkMeta, id string) ([]LinkMeta, bool) {
-	found := false
-	result := []LinkMeta{}
-	for _, e := range entries {
-		if e.ID == id {
-			found = true
-			continue
-		}
-		result = append(result, e)
-	}
-	return result, found
-}
-
-func readOrCreateJSON(filePath string, v interface{}) error {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			if writeErr := os.WriteFile(filePath, []byte("[]\n"), 0644); writeErr != nil {
-				return fmt.Errorf("failed to create file: %w", writeErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("failed to read file: %w", err)
-	}
-	fmt.Println(data)
-	if err := json.Unmarshal(data, v); err != nil {
-		return fmt.Errorf("failed to parse JSON: %w", err)
-	}
-	return nil
-}
-
 func cleanUpScheduler(ctx context.Context) {
 	cleanUp()
 	t:= time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
@@ -414,15 +330,22 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if len(files) > 1 {
+		sendJSON(w, false, http.StatusBadRequest, "1 file at a time, or use send dir")
+		return
+	}
+
+	fileUUID := uuid.New().String()
 	if link != "" {
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed) VALUES (?, ?, ?, ?, ?, ?,?);",
-			uuid.New().String(),
+		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_dir) VALUES (?, ?, ?, ?, ?, ?,?,?);",
+			fileUUID,
 			sender.ID,
 			receiver_id,
 			"link",
 			link,
 			time.Now().Format("2006-01-02 15:04"),
 			false,
+			isDir,
 		)
 		if err != nil {
 			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
@@ -430,9 +353,15 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fmt.Printf("LINK SAVED: %s\n", link)
-	}
 
-	for _, fileHeader := range files {
+	} else if len(files) != 0 {
+		isDir,err  := strconv.ParseBool(r.Header.Get("Directory"))
+		if err != nil {
+			sendJSON(w, false, http.StatusBadRequest, "bad isdir header")
+			return
+		}
+
+		fileHeader := files[0]
 
 		file, err := fileHeader.Open()
 		if err != nil {
@@ -441,7 +370,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 		defer file.Close()
 
-		fileUUID := uuid.New().String()
+		
 
 		dst, err := os.Create(filepath.Join(appConfig.SaveDir, fileUUID))
 		if err != nil {
@@ -472,9 +401,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		fmt.Printf("file saved")
-
 	}
-	sendJSON(w, true, http.StatusOK, "Upload success")
+		
+	sendJSON(w, true, http.StatusOK, fileUUID)
 }
 
 func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
