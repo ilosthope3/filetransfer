@@ -1,19 +1,20 @@
 package main
 
 import (
-	"fmt"
-	"net/http"
-	"io"
-	"encoding/json"
 	"bytes"
-	"sort"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"mime"
+	"mime/multipart"
+	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
-	"path/filepath"
-	"mime/multipart"
-	"errors"
-	"mime"
 )
 
 type ClientConfig struct {
@@ -24,6 +25,8 @@ type ClientConfig struct {
 	PollIntervalSeconds int    `json:"poll_interval_seconds"`
 }
 
+type UploadType string
+
 type APIResponse struct {
 	Success bool        `json:"success"`
 	Data    interface{} `json:"data,omitempty"`
@@ -31,17 +34,23 @@ type APIResponse struct {
 }
 
 type Client struct {
-	Token string
-	Name string
+	Token  string
+	Name   string
 	Client http.Client
 	Config ClientConfig
 }
 
 type Dir struct {
-	Files []string `json:"files"`
-	DirName string `json:"name"`
-	Dirs []Dir		 `json:"dirs,omitempty"`
+	Files   []string `json:"files"`
+	DirName string   `json:"name"`
+	Dirs    []Dir    `json:"dirs,omitempty"`
 }
+
+const (
+	UploadFile        UploadType = "file"
+	UploadDirChild    UploadType = "dir-child"
+	UploadDirManifest UploadType = "dir-manifest"
+)
 
 func (a APIResponse) String() string {
 	r, err := json.MarshalIndent(a, "", "  ")
@@ -57,7 +66,7 @@ func (a APIResponse) String() string {
 func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	var reader io.Reader
 
-	if method == "POST" && data==nil { //post eq always has a body
+	if method == "POST" && data == nil { //post eq always has a body
 		data = map[string]interface{}{}
 	}
 
@@ -73,13 +82,12 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create request: %w", err)
 	}
-	
+
 	if data != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	
+
 	req.Header.Set("Authorization", "Bearer "+c.Token)
-	
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -94,16 +102,16 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	return &out, nil
 }
 
-func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFlag bool) (*APIResponse, error) {
+func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFlag UploadType) (*APIResponse, error) {
 	req, err := http.NewRequest(method, c.Config.Server+path, body)
 	if err != nil {
-			return nil, err
+		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	req.Header.Set("Directory", strconv.FormatBool(dirFlag))
+	req.Header.Set("Directory", string(dirFlag))
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -119,23 +127,23 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 }
 
 func (c *Client) Download(id string) error {
-  req, err := http.NewRequest("POST", c.Config.Server+"download?id="+id, nil)
-  if err != nil {
-    return err
-  }
-  req.Header.Set("Authorization", "Bearer "+c.Token)
+	req, err := http.NewRequest("POST", c.Config.Server+"download?id="+id, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
 
-  resp, err := c.Client.Do(req)
-  if err != nil {
-    return err
-  }
-  defer resp.Body.Close()
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
 
-  if resp.StatusCode != http.StatusOK {
-    body, _ := io.ReadAll(resp.Body)
-    return fmt.Errorf("server %d: %s", resp.StatusCode, body)
-  }
-	
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server %d: %s", resp.StatusCode, body)
+	}
+
 	cd := resp.Header.Get("Content-Disposition")
 	if cd == "" {
 		return fmt.Errorf("server sent no Content-Disposition")
@@ -151,7 +159,7 @@ func (c *Client) Download(id string) error {
 	name = filepath.Base(name)
 
 	base := strings.TrimSuffix(name, filepath.Ext(name))
-	ext  := filepath.Ext(name)
+	ext := filepath.Ext(name)
 
 	dest := filepath.Join(c.Config.SaveDir, name)
 	for i := 1; ; i++ {
@@ -165,119 +173,118 @@ func (c *Client) Download(id string) error {
 		dest = filepath.Join(c.Config.SaveDir,
 			fmt.Sprintf("%s (%d)%s", base, i, ext))
 	}
-	
-  out, err := os.Create(dest)
-  if err != nil {
-    return err
-  }
-  defer out.Close()
 
-  n, err := io.Copy(out, resp.Body)
-  if err != nil {
-    return err
-  }
-  if resp.ContentLength >= 0 && n != resp.ContentLength {
-    return fmt.Errorf("short read: %d/%d", n, resp.ContentLength)
-  }
-  return out.Close()
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	n, err := io.Copy(out, resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.ContentLength >= 0 && n != resp.ContentLength {
+		return fmt.Errorf("short read: %d/%d", n, resp.ContentLength)
+	}
+	return out.Close()
 }
 
 func (c *Client) Init() {
-  home, err := os.UserHomeDir()
-  if err != nil {
-    fmt.Println("failed to find home dir:", err)
-    os.Exit(1)
-  }
-  dir := filepath.Join(home, ".filetransfer")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Println("failed to find home dir:", err)
+		os.Exit(1)
+	}
+	dir := filepath.Join(home, ".filetransfer")
 
-  if err := os.MkdirAll(dir, 0o700); err != nil {
-    fmt.Println("failed to create app dir:", err)
-    os.Exit(1)
-  }
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		fmt.Println("failed to create app dir:", err)
+		os.Exit(1)
+	}
 
-  cfgPath := filepath.Join(dir, "client_config.json")
-  if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-    defaultCfg := ClientConfig{
-      Server:              "http://localhost:7842/",
-      TimeoutSeconds:      5,
-      SaveDir:             "~/Downloads/filetransfer",
-      AutoDownload:        false,
-      PollIntervalSeconds: 30,
-    }
-    err := saveConfig(defaultCfg)
+	cfgPath := filepath.Join(dir, "client_config.json")
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		defaultCfg := ClientConfig{
+			Server:              "http://localhost:7842/",
+			TimeoutSeconds:      5,
+			SaveDir:             "~/Downloads/filetransfer",
+			AutoDownload:        false,
+			PollIntervalSeconds: 30,
+		}
+		err := saveConfig(defaultCfg)
 		if err != nil {
 			fmt.Println("error writing default cfg")
 			os.Exit(1)
 		}
-  }
+	}
 	if err := c.loadConfig(); err != nil {
 		fmt.Printf("Fatal: %v", err)
 		os.Exit(1)
 	}
 
+	tokPath := filepath.Join(dir, "token")
+	if _, err := os.Stat(tokPath); os.IsNotExist(err) {
+		if err := os.WriteFile(tokPath, []byte{}, 0o600); err != nil {
+			fmt.Println("failed to create token file:", err)
+			os.Exit(1)
+		}
+	}
 
-  tokPath := filepath.Join(dir, "token")
-  if _, err := os.Stat(tokPath); os.IsNotExist(err) {
-    if err := os.WriteFile(tokPath, []byte{}, 0o600); err != nil {
-      fmt.Println("failed to create token file:", err)
-      os.Exit(1)
-    }
-  }
-  
 	if tb, err := os.ReadFile(tokPath); err == nil {
 		c.Token = strings.TrimSpace(string(tb))
 	}
 
-  timeout := time.Duration(c.Config.TimeoutSeconds) * time.Second
-  if timeout == 0 {
-    timeout = 5 * time.Second
-  }
-  c.Client = http.Client{Timeout: timeout}
+	timeout := time.Duration(c.Config.TimeoutSeconds) * time.Second
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	c.Client = http.Client{Timeout: timeout}
 }
 
 func (c *Client) loadConfig() error {
 	home, err := os.UserHomeDir()
-  if err != nil {
-    fmt.Println("failed to find home dir:", err)
-    os.Exit(1)
-  }
-  cfgPath := filepath.Join(home, ".filetransfer", "client_config.json")
+	if err != nil {
+		fmt.Println("failed to find home dir:", err)
+		os.Exit(1)
+	}
+	cfgPath := filepath.Join(home, ".filetransfer", "client_config.json")
 
 	b, err := os.ReadFile(cfgPath)
-  if err != nil {
-    return err
-  }
-  if err := json.Unmarshal(b, &c.Config); err != nil {
-    return err
-  }
+	if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(b, &c.Config); err != nil {
+		return err
+	}
 
-  if strings.HasPrefix(c.Config.SaveDir, "~/") {
-    c.Config.SaveDir = filepath.Join(home, c.Config.SaveDir[2:])
-  }
+	if strings.HasPrefix(c.Config.SaveDir, "~/") {
+		c.Config.SaveDir = filepath.Join(home, c.Config.SaveDir[2:])
+	}
 
-  if err := os.MkdirAll(c.Config.SaveDir, 0o755); err != nil {
-    return err
-  }
+	if err := os.MkdirAll(c.Config.SaveDir, 0o755); err != nil {
+		return err
+	}
 
-  if c.Config.Server == "" {
-    return err
-  }
+	if c.Config.Server == "" {
+		return err
+	}
 	return nil
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func saveConfig(cfg ClientConfig) error {
-  home, err := os.UserHomeDir()
-  if err != nil {
-    return err
-  }
-  path := filepath.Join(home, ".filetransfer", "client_config.json")
-  b, err := json.MarshalIndent(cfg, "", "  ")
-  if err != nil {
-    return err
-  }
-  return os.WriteFile(path, b, 0o600)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(home, ".filetransfer", "client_config.json")
+	b, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o600)
 }
 
 func saveToken(token string) error {
@@ -335,6 +342,37 @@ func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, er
 	}
 	w.WriteField("receiver", receiver)
 	w.Close()
+
+	return &body, w.FormDataContentType(), nil
+}
+
+func buildDirManifestBody(receiver string, root Dir) (*bytes.Buffer, string, error) {
+	var jsonBody bytes.Buffer
+
+	err := json.NewEncoder(&jsonBody).Encode(root)
+	if err != nil {
+		return nil, "", err
+	}
+
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+
+	part, err := w.CreateFormFile("file", fmt.Sprintf("%s.json", root.DirName))
+	if err != nil {
+		return nil, "", err
+	}
+
+	if _, err := io.Copy(part, &jsonBody); err != nil {
+		return nil, "", err
+	}
+
+	if err := w.WriteField("receiver", receiver); err != nil {
+		return nil, "", err
+	}
+
+	if err := w.Close(); err != nil {
+		return nil, "", err
+	}
 
 	return &body, w.FormDataContentType(), nil
 }
@@ -438,8 +476,8 @@ func cmdDevices(c *Client, args []string) {
 	}
 
 	type Device struct {
-    ID   float64
-    Name string
+		ID   float64
+		Name string
 	}
 
 	var devices []Device
@@ -456,7 +494,7 @@ func cmdDevices(c *Client, args []string) {
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].ID < devices[j].ID
 	})
-	
+
 	fmt.Println("\n  DEVICES:")
 	for _, d := range devices {
 		fmt.Printf("    [%v] %v\n", d.ID, d.Name)
@@ -472,13 +510,13 @@ func cmdFiles(c *Client, args []string) {
 		fmt.Printf("%v\n", err)
 		return
 	}
-	
+
 	if len(list) == 0 {
 		fmt.Println("Empty")
 		return
 	}
 
-	truncate := func (s string, n int) string {
+	truncate := func(s string, n int) string {
 		r := []rune(s)
 		if len(r) <= n {
 			return s
@@ -493,10 +531,10 @@ func cmdFiles(c *Client, args []string) {
 
 		if t, _ := row["type"].(string); t == "link" {
 			text := fmt.Sprintf("%v", row["url"])
-			fmt.Printf("    [%s] T  %-60s  from %s  %s\n", id, truncate(text, 60), sender, date)
+			fmt.Printf("    [%s] T  %-60s  from [%s]  %s\n", id, truncate(text, 60), sender, date)
 		} else {
 			name := fmt.Sprintf("%v", row["filename"])
-			fmt.Printf("    [%s] F  %-60s  from %s  %s\n", id, truncate(name, 60), sender, date)
+			fmt.Printf("    [%s] F  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
 		}
 	}
 	fmt.Println()
@@ -509,8 +547,8 @@ func cmdWho(c *Client, args []string) {
 		os.Exit(1)
 	}
 	type Device struct {
-    ID   float64
-    Name string
+		ID   float64
+		Name string
 	}
 
 	dev, ok := r.Data.(map[string]any)
@@ -521,9 +559,8 @@ func cmdWho(c *Client, args []string) {
 	id, _ := dev["id"].(float64)
 	name, _ := dev["name"].(string)
 
-	
 	fmt.Printf("\n  Logged in as [%v] - %v\n\n", id, name)
-	
+
 }
 
 func cmdDir(c *Client, args []string) {
@@ -538,7 +575,6 @@ func cmdDir(c *Client, args []string) {
 		os.Exit(1)
 	}
 
-	
 	f, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		fmt.Println("no such path found")
@@ -554,7 +590,7 @@ func cmdDir(c *Client, args []string) {
 	traverseDir = func(path string) Dir {
 
 		var r Dir
-		r.DirName = filepath.Base(path) // last folder name type shi
+		r.DirName = filepath.Base(path)
 		files, err := os.ReadDir(path)
 		if err != nil {
 			fmt.Printf("error reading dir: %s\n%v\n", path, err)
@@ -562,10 +598,10 @@ func cmdDir(c *Client, args []string) {
 		}
 		r.Dirs = []Dir{}
 		r.Files = []string{}
-		
-		for _, item := range files{
+
+		for _, item := range files {
 			if item.IsDir() {
-				r.Dirs = append(r.Dirs, traverseDir(filepath.Join(path, item.Name()))) //fix for actual dir
+				r.Dirs = append(r.Dirs, traverseDir(filepath.Join(path, item.Name())))
 			} else {
 				cpath := filepath.Join(path, item.Name())
 				body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), strings.TrimSpace(cpath), "")
@@ -574,7 +610,7 @@ func cmdDir(c *Client, args []string) {
 					continue
 				}
 
-				resp, err := c.SendRaw("POST", "upload", contentType, body, false)
+				resp, err := c.SendRaw("POST", "upload", contentType, body, UploadDirChild)
 				if err != nil {
 					fmt.Printf("error uploading: %s\n%v\n", cpath, err)
 					continue
@@ -583,28 +619,46 @@ func cmdDir(c *Client, args []string) {
 					fmt.Printf("error: %s\n%v\n", cpath, resp.Error)
 					continue
 				}
-				
+
 				r.Files = append(r.Files, resp.Data.(string))
-				
+
 			}
 		}
 
-		if len(r.Dirs) == 0 {r.Dirs = nil}
-		if len(r.Files) == 0 {r.Files = nil}
+		if len(r.Dirs) == 0 {
+			r.Dirs = nil
+		}
+		if len(r.Files) == 0 {
+			r.Files = nil
+		}
 		return r
 	}
 
 	root := traverseDir(path)
 
-	data, err := json.Marshal(root)
+	body, contentType, err := buildDirManifestBody(receiver, root)
 	if err != nil {
-		fmt.Printf("error creating manifest: %v\n", err)
-		os.Exit(1)
+		fmt.Printf("error building manifest: %v\n", err)
+		return
 	}
 
-	
-	//c.SendRaw need to change isdir flag to 3rd case of not, dirfile and dir 
+	resp, err := c.SendRaw(
+		"POST",
+		"upload",
+		contentType,
+		body,
+		UploadDirManifest,
+	)
 
+	if err != nil {
+		fmt.Printf("error when sending %v\n", err)
+		os.Exit(1)
+	}
+	if !resp.Success {
+		fmt.Printf("error server: %v\n", resp.Error)
+		os.Exit(1)
+	}
+	fmt.Println("dir saved ok")
 
 }
 
@@ -626,7 +680,7 @@ func cmdSend(c *Client, args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := c.SendRaw("POST", "upload", contentType, body, false)
+	resp, err := c.SendRaw("POST", "upload", contentType, body, UploadFile)
 	if err != nil {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
@@ -643,7 +697,7 @@ func cmdLink(c *Client, args []string) {
 		fmt.Println("filetransfer link <receiver>:<url>")
 		os.Exit(1)
 	}
-	
+
 	inp := strings.Join(args, " ")
 	receiver, url, found := strings.Cut(inp, ":")
 	if !found {
@@ -657,7 +711,7 @@ func cmdLink(c *Client, args []string) {
 		os.Exit(1)
 	}
 
-	resp, err := c.SendRaw("POST", "upload", contentType, body, false)
+	resp, err := c.SendRaw("POST", "upload", contentType, body, UploadFile)
 	if err != nil {
 		fmt.Println("error uploading:", err)
 		os.Exit(1)
@@ -670,94 +724,94 @@ func cmdLink(c *Client, args []string) {
 }
 
 func cmdDownload(c *Client, args []string) {
-  if len(args) == 0 {
-    fmt.Println("download all|<fileID> [<fileID> ...]")
-    return
-  }
+	if len(args) == 0 {
+		fmt.Println("download all|<fileID> [<fileID> ...]")
+		return
+	}
 
-  var fileIDs []string
-  if args[0] == "all" {
-    files, err := getFiles(c)
-    if err != nil {
-      fmt.Println("error:", err)
-      return
-    }
-    for _, f := range files {
-      if id, ok := f["id"].(string); ok {
-        fileIDs = append(fileIDs, id)
-      }
-    }
-  } else {
-    fileIDs = args
-  }
-
-  for _, id := range fileIDs {
-    if err := c.Download(id); err != nil {
-      fmt.Printf("ID %s\terror: %v\n", id, err)
-      continue
-    }
-    if resp, err := c.Send("DELETE", "delete?id="+id, nil); err!= nil{
-      fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
-      continue
-    } else if !resp.Success {
-			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, resp.Error)
-      continue
+	var fileIDs []string
+	if args[0] == "all" {
+		files, err := getFiles(c)
+		if err != nil {
+			fmt.Println("error:", err)
+			return
 		}
-		
-    fmt.Printf("ID %s\tOK\n", id)
-  }
+		for _, f := range files {
+			if id, ok := f["id"].(string); ok {
+				fileIDs = append(fileIDs, id)
+			}
+		}
+	} else {
+		fileIDs = args
+	}
+
+	for _, id := range fileIDs {
+		if err := c.Download(id); err != nil {
+			fmt.Printf("ID %s\terror: %v\n", id, err)
+			continue
+		}
+		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err != nil {
+			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
+			continue
+		} else if !resp.Success {
+			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, resp.Error)
+			continue
+		}
+
+		fmt.Printf("ID %s\tOK\n", id)
+	}
 }
 
 func cmdDelete(c *Client, args []string) {
 	if len(args) == 0 {
-    fmt.Println("delete all|<fileID> [<fileID> ...]")
-    return
-  }
+		fmt.Println("delete all|<fileID> [<fileID> ...]")
+		return
+	}
 
 	var fileIDs []string
-  if args[0] == "all" {
-    files, err := getFiles(c)
-    if err != nil {
-      fmt.Println("error:", err)
-      return
-    }
-    for _, f := range files {
-      if id, ok := f["id"].(string); ok {
-        fileIDs = append(fileIDs, id)
-      }
-    }
-  } else {
-    fileIDs = args
-  }
+	if args[0] == "all" {
+		files, err := getFiles(c)
+		if err != nil {
+			fmt.Println("error:", err)
+			return
+		}
+		for _, f := range files {
+			if id, ok := f["id"].(string); ok {
+				fileIDs = append(fileIDs, id)
+			}
+		}
+	} else {
+		fileIDs = args
+	}
 	for _, id := range fileIDs {
-		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err!= nil{
+		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err != nil {
 			fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
 			continue
 		} else if !resp.Success {
 			fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
 			continue
 		}
-		
+
 		fmt.Printf("ID %s\tdeleted\n", id)
 	}
 
 }
 
 func cmdEditCFG(c *Client, args []string) {
-  b, err := json.MarshalIndent(c.Config, "", "  ")
-  if err != nil {
-    fmt.Println("error:", err)
-    return
-  }
+	b, err := json.MarshalIndent(c.Config, "", "  ")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 
 	home, err := os.UserHomeDir()
-  if err != nil {
-    fmt.Println("failed to find home dir:", err)
-    os.Exit(1)
-  }
-  path := filepath.Join(home, ".filetransfer", "client_config.json")
-  fmt.Println("\n\nCONFIG PATH:", path)
-  fmt.Println(string(b))
+	if err != nil {
+		fmt.Println("failed to find home dir:", err)
+		os.Exit(1)
+	}
+	path := filepath.Join(home, ".filetransfer", "client_config.json")
+	fmt.Println("\n\nCONFIG PATH:", path)
+	fmt.Println(string(b))
 }
 
 func cmdDeleteUser(c *Client, args []string) {
@@ -765,27 +819,27 @@ func cmdDeleteUser(c *Client, args []string) {
 		fmt.Println("deleteUser <id>")
 	}
 	id := args[0]
-	if resp, err := c.Send("DELETE", "delete-user?id="+id, nil); err!= nil{
+	if resp, err := c.Send("DELETE", "delete-user?id="+id, nil); err != nil {
 		fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
 		return
 	} else if !resp.Success {
 		fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
 		return
 	}
-	
+
 	fmt.Printf("ID %s\tdeleted\n", id)
 
 }
 
 func runDaemon(ctx context.Context, c *Client) {
-  t := time.NewTicker(interval)
-  defer t.Stop()
-  for {
-    select {
-    case <-ctx.Done():
-      return
-    case <-t.C:
-      cmdDownload(c, []string{"all"})
-    }
-  }
+	t := time.NewTicker(time.Duration(c.Config.PollIntervalSeconds))
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			cmdDownload(c, []string{"all"})
+		}
+	}
 }

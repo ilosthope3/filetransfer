@@ -1,34 +1,36 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/google/uuid"
 	"io"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strings"
-	"time"
-	"strconv"
-	"context"
-	"syscall"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"syscall"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 type (
 	Config struct {
-		TokensFile  string
-		SaveDir     string
-		MaxFormSize int64
-		Password    string
+		TokensFile           string
+		SaveDir              string
+		MaxFormSize          int64
+		Password             string
 		AllowCrossUserDelete bool
-		CleanIntervalMins int
+		CleanIntervalMins    int
 	}
 	APIResponse struct {
 		Success bool        `json:"success"`
@@ -56,7 +58,6 @@ type (
 
 var (
 	appConfig Config
-	tokenMap  map[string]string
 )
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -105,34 +106,19 @@ func authenticate(r *http.Request) (UserRecord, error) {
 
 }
 
-func devInit() {
-	if err := os.RemoveAll(appConfig.SaveDir); err != nil {
-		fmt.Println("deverr1: %v", err)
-	}
-	if err := os.MkdirAll(appConfig.SaveDir, os.ModePerm); err != nil {
-		fmt.Println("deverr2: %v", err)
-	}
-	if err := os.WriteFile(appConfig.TokensFile, []byte("{}\n"), 0644); err != nil {
-		fmt.Println("deverr3: %v", err)
-	}
-	fmt.Println("files reset")
-}
-
 func mainInit() {
 
-	appConfig.MaxFormSize = 50 << 20
+	appConfig.MaxFormSize = 50 << 40
 	appConfig.SaveDir = "data"
 	appConfig.Password = "123"
 	appConfig.AllowCrossUserDelete = true
 	appConfig.CleanIntervalMins = 30
 
-
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
 		log.Fatalf("create save dir: %v", err)
 	}
 
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)	
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go cleanUpScheduler(ctx)
 
@@ -140,13 +126,13 @@ func mainInit() {
 
 func cleanUpScheduler(ctx context.Context) {
 	cleanUp()
-	t:= time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
+	t := time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
 	defer t.Stop()
 	for {
 		select {
-		case <- ctx.Done():
+		case <-ctx.Done():
 			return
-		case <- t.C:
+		case <-t.C:
 			err := cleanUp()
 			if err != nil {
 				fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
@@ -209,7 +195,6 @@ func cleanUp() error {
 		return removed, nil
 	}
 
-
 	r, err := DB.Exec(`
 		DELETE FROM items
 		WHERE receiver_id NOT IN (SELECT id FROM users)
@@ -218,17 +203,17 @@ func cleanUp() error {
 		return err
 	}
 
-  orphans, err := removeOrphanBlobs()
-  if err != nil {
-    fmt.Println("orphan sweep:", err)
+	orphans, err := removeOrphanBlobs()
+	if err != nil {
+		fmt.Println("orphan sweep:", err)
 		return err
-  }
-
+	}
 
 	n, _ := r.RowsAffected()
-  fmt.Printf("cleanup: rows=%d orphans=%d\n",n, orphans)
-  return nil
+	fmt.Printf("cleanup: rows=%d orphans=%d\n", n, orphans)
+	return nil
 }
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
@@ -289,7 +274,6 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	sendJSON(w, true, http.StatusOK, row.Token)
-	return
 }
 
 func handleUpload(w http.ResponseWriter, r *http.Request) {
@@ -301,6 +285,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	err = r.ParseMultipartForm(appConfig.MaxFormSize)
 	if err != nil {
+		fmt.Printf("form parse error %v\n", err)
 		sendJSON(w, false, http.StatusBadRequest, "Files too large")
 		return
 	}
@@ -334,6 +319,12 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, false, http.StatusBadRequest, "1 file at a time, or use send dir")
 		return
 	}
+	typeDir := r.Header.Get("Directory")
+
+	if !slices.Contains([]string{"file", "dir-child", "dir-manifest"}, typeDir) {
+		sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
+		return
+	}
 
 	fileUUID := uuid.New().String()
 	if link != "" {
@@ -345,7 +336,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			link,
 			time.Now().Format("2006-01-02 15:04"),
 			false,
-			isDir,
+			typeDir,
 		)
 		if err != nil {
 			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
@@ -355,11 +346,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		fmt.Printf("LINK SAVED: %s\n", link)
 
 	} else if len(files) != 0 {
-		isDir,err  := strconv.ParseBool(r.Header.Get("Directory"))
-		if err != nil {
-			sendJSON(w, false, http.StatusBadRequest, "bad isdir header")
-			return
-		}
 
 		fileHeader := files[0]
 
@@ -369,8 +355,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer file.Close()
-
-		
 
 		dst, err := os.Create(filepath.Join(appConfig.SaveDir, fileUUID))
 		if err != nil {
@@ -385,7 +369,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed) VALUES (?, ?, ?, ?, ?, ?, ?, ?);",
+		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
 			fileUUID,
 			sender.ID,
 			receiver_id,
@@ -394,6 +378,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			fileHeader.Size,
 			time.Now().Format("2006-01-02 15:04"),
 			false,
+			typeDir,
 		)
 		if err != nil {
 			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
@@ -402,7 +387,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 		fmt.Printf("file saved")
 	}
-		
+
 	sendJSON(w, true, http.StatusOK, fileUUID)
 }
 
@@ -414,6 +399,12 @@ func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var users []UserRecord
+
+	users = append(users, UserRecord{
+		ID:    device.ID,
+		Token: "",
+		Name:  fmt.Sprintf("%s  <-- current user", device.Name),
+	})
 	rows, err := DB.Query(
 		`SELECT id, username
 		FROM users
@@ -455,9 +446,9 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 	files := []FileRecord{}
 
 	rows, err := DB.Query(
-		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at
+		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at, is_dir
 		FROM items
-		WHERE receiver_id = ? AND consumed = FALSE`,
+		WHERE receiver_id = ? AND consumed = FALSE AND NOT(is_dir = "dir-child")`,
 		device.ID,
 	)
 	if err != nil {
@@ -480,6 +471,7 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 			&f.UploadedAt,
 			&f.Consumed,
 			&f.ConsumedAt,
+			&f.DirType,
 		); err != nil {
 			log.Printf("scan item: %v", err)
 			continue
@@ -496,38 +488,38 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleDelete(w http.ResponseWriter, r *http.Request) {
-  device, err := authenticate(r)
-  if err != nil {
-    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
-    return
-  }
+	device, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
-  id := r.URL.Query().Get("id")
-  if id == "" {
-    sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
-    return
-  }
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
+		return
+	}
 
-  var res sql.Result
-  if id == "all" {
-    res, err = DB.Exec(
-      `UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND consumed = FALSE`,
-      time.Now(), device.ID,
-    )
-  } else {
-    res, err = DB.Exec(
-      `UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND id = ? AND consumed = FALSE`,
-      time.Now(), device.ID, id,
-    )
-  }
-  if err != nil {
-    fmt.Println("delete update failed:", err)
-    sendJSON(w, false, http.StatusInternalServerError, "db update failed")
-    return
-  }
+	var res sql.Result
+	if id == "all" {
+		res, err = DB.Exec(
+			`UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND consumed = FALSE`,
+			time.Now(), device.ID,
+		)
+	} else {
+		res, err = DB.Exec(
+			`UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND id = ? AND consumed = FALSE`,
+			time.Now(), device.ID, id,
+		)
+	}
+	if err != nil {
+		fmt.Println("delete update failed:", err)
+		sendJSON(w, false, http.StatusInternalServerError, "db update failed")
+		return
+	}
 
-  n, _ := res.RowsAffected()
-  sendJSON(w, true, http.StatusOK, fmt.Sprintf("marked %d item(s) consumed", n))
+	n, _ := res.RowsAffected()
+	sendJSON(w, true, http.StatusOK, fmt.Sprintf("marked %d item(s) consumed", n))
 }
 
 func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -539,12 +531,12 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	s := r.URL.Query().Get("id")
 	id, err := strconv.Atoi(s)
-  if err != nil {
-    sendJSON(w, false, http.StatusBadRequest, "missing/invalid id parameter")
-    return
-  }
-		
-	if( !appConfig.AllowCrossUserDelete )&&( int64(id) != device.ID){
+	if err != nil {
+		sendJSON(w, false, http.StatusBadRequest, "missing/invalid id parameter")
+		return
+	}
+
+	if (!appConfig.AllowCrossUserDelete) && (int64(id) != device.ID) {
 		sendJSON(w, false, http.StatusBadRequest, "cross user delete disabled, input nd self ids do not match")
 		return
 	}
@@ -559,67 +551,66 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 
 	n, _ := res.RowsAffected()
 	if n == 0 {
-		sendJSON(w, false, http.StatusBadRequest, fmt.Sprintf("no user with id %v",id))
+		sendJSON(w, false, http.StatusBadRequest, fmt.Sprintf("no user with id %v", id))
 		return
 	}
-	sendJSON(w, true, http.StatusOK, fmt.Sprintf("deleted user %v",id))
+	sendJSON(w, true, http.StatusOK, fmt.Sprintf("deleted user %v", id))
 
-	
 }
 
 func handleDownload(w http.ResponseWriter, r *http.Request) {
-  device, err := authenticate(r)
-  if err != nil {
-    sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
-    return
-  }
+	device, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "unauthorized")
+		return
+	}
 
-  id := r.URL.Query().Get("id")
-  if id == "" {
-    sendJSON(w, false, http.StatusBadRequest, "missing id")
-    return
-  }
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		sendJSON(w, false, http.StatusBadRequest, "missing id")
+		return
+	}
 
-  var f FileRecord
-  err = DB.QueryRow(
-    `SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at
+	var f FileRecord
+	err = DB.QueryRow(
+		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at, is_dir
      FROM items
-     WHERE receiver_id = ? AND consumed = FALSE AND id = ?`,
-    device.ID, id,
-  ).Scan(&f.ID, &f.UUID, &f.SenderID, &f.ReceiverID, &f.Type,
-    &f.Filename, &f.Size, &f.URL, &f.UploadedAt, &f.Consumed, &f.ConsumedAt)
-  if err != nil {
-    if err == sql.ErrNoRows {
-      sendJSON(w, false, http.StatusBadRequest, "no such id found")
-      return
-    }
-    sendJSON(w, false, http.StatusInternalServerError, "db error during euth service")
-    return
-  }
+     WHERE receiver_id = ? AND consumed = FALSE AND id = ? AND is_dir`,
+		device.ID, id,
+	).Scan(&f.ID, &f.UUID, &f.SenderID, &f.ReceiverID, &f.Type,
+		&f.Filename, &f.Size, &f.URL, &f.UploadedAt, &f.Consumed, &f.ConsumedAt, &f.DirType)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			sendJSON(w, false, http.StatusBadRequest, "no such id found")
+			return
+		}
+		sendJSON(w, false, http.StatusInternalServerError, "db error during euth service")
+		return
+	}
 
-  if f.Type == "link" {
-    sendJSON(w, true, http.StatusOK, f.URL)
-    return
-  }
+	if f.Type == "link" {
+		sendJSON(w, true, http.StatusOK, f.URL)
+		return
+	}
 
-  filePath := filepath.Join(appConfig.SaveDir, f.UUID)
-  file, err := os.Open(filePath)
-  if err != nil {
-    sendJSON(w, false, http.StatusNotFound, "file not found on disk")
-    return
-  }
-  defer file.Close()
+	filePath := filepath.Join(appConfig.SaveDir, f.UUID)
+	file, err := os.Open(filePath)
+	if err != nil {
+		sendJSON(w, false, http.StatusNotFound, "file not found on disk")
+		return
+	}
+	defer file.Close()
 
 	filenameDeref := f.UUID
 	if f.Filename != nil {
 		filenameDeref = *f.Filename
 	}
 
-  safe := strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(filenameDeref)
+	safe := strings.NewReplacer(`"`, "", "\r", "", "\n", "").Replace(filenameDeref)
 	w.Header().Set("Content-Disposition", `attachment; filename="`+safe+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, filenameDeref, time.Now(), file)
-  fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
+	fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
 }
 
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////

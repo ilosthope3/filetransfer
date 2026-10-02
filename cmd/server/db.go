@@ -8,17 +8,18 @@ import (
 )
 
 type FileRecord struct {
-	ID         int64  `json:"id"`
-	UUID       string `json:"uuid"`
-	SenderID   int64  `json:"sender_id"`
-	ReceiverID int64  `json:"receiver_id"`
+	ID         int64   `json:"id"`
+	UUID       string  `json:"uuid"`
+	SenderID   int64   `json:"sender_id"`
+	ReceiverID int64   `json:"receiver_id"`
 	Filename   *string `json:"filename,omitempty"`
 	Size       *int64  `json:"size,omitempty"`
-	UploadedAt string `json:"uploaded_at"`
-	Consumed   bool   `json:"consumed"`
+	UploadedAt string  `json:"uploaded_at"`
+	Consumed   bool    `json:"consumed"`
 	ConsumedAt *string `json:"consumed_at"`
-	Type       string `json:"type"`
+	Type       string  `json:"type"`
 	URL        *string `json:"url,omitempty"`
+	DirType    *string `json:"dir_type,omitempty"`
 }
 
 type UserRecord struct {
@@ -55,7 +56,7 @@ func InitDB(path string) {
     uploaded_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     consumed       BOOLEAN DEFAULT FALSE,
     consumed_at    DATETIME,
-		is_dir         BOOLEAN DEFAULT FALSE
+		is_dir         TEXT
 	);`
 
 	if _, err := DB.Exec(schema); err != nil {

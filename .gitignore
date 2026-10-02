@@ -76,3 +76,4 @@ TODO.txt
 filetransfer
 #testing sending txt files
 cmd/client/*.txt
+cmd/client/hi
