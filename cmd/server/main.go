@@ -108,35 +108,36 @@ func authenticate(r *http.Request) (UserRecord, error) {
 
 func mainInit() {
 
-	appConfig.MaxFormSize = 50 << 40
+	appConfig.MaxFormSize = 500 << 20
 	appConfig.SaveDir = "data"
 	appConfig.Password = "123"
 	appConfig.AllowCrossUserDelete = true
-	appConfig.CleanIntervalMins = 30
+	appConfig.CleanIntervalMins = 60
 
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
 		log.Fatalf("create save dir: %v", err)
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	go cleanUpScheduler(ctx)
-
 }
 
 func cleanUpScheduler(ctx context.Context) {
-	cleanUp()
+	err := cleanUp()
+	if err != nil {
+		fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
+	}
 	t := time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("done daemon")
 			return
 		case <-t.C:
 			err := cleanUp()
 			if err != nil {
 				fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
 			}
+			fmt.Println("called")
 		}
 	}
 }
@@ -620,6 +621,10 @@ func main() {
 	defer DB.Close()
 
 	mainInit()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go cleanUpScheduler(ctx)
 
 	http.HandleFunc("/upload", handleUpload)
 	http.HandleFunc("/auth", handleLogin)

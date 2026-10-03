@@ -126,7 +126,7 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 	return &out, nil
 }
 
-func (c *Client) Download(id string) error {
+func (c *Client) Download(id, path string) error {
 	req, err := http.NewRequest("POST", c.Config.Server+"download?id="+id, nil)
 	if err != nil {
 		return err
@@ -161,7 +161,7 @@ func (c *Client) Download(id string) error {
 	base := strings.TrimSuffix(name, filepath.Ext(name))
 	ext := filepath.Ext(name)
 
-	dest := filepath.Join(c.Config.SaveDir, name)
+	dest := filepath.Join(path, name)
 	for i := 1; ; i++ {
 		_, err := os.Stat(dest)
 		if os.IsNotExist(err) {
@@ -170,7 +170,7 @@ func (c *Client) Download(id string) error {
 		if err != nil {
 			return fmt.Errorf("stat %s: %w", dest, err)
 		}
-		dest = filepath.Join(c.Config.SaveDir,
+		dest = filepath.Join(path,
 			fmt.Sprintf("%s (%d)%s", base, i, ext))
 	}
 
@@ -746,7 +746,7 @@ func cmdDownload(c *Client, args []string) {
 	}
 
 	for _, id := range fileIDs {
-		if err := c.Download(id); err != nil {
+		if err := c.Download(id, c.Config.SaveDir); err != nil {
 			fmt.Printf("ID %s\terror: %v\n", id, err)
 			continue
 		}
