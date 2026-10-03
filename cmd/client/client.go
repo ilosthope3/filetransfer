@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+
 	"strings"
 	"time"
 )
@@ -49,7 +51,7 @@ type Dir struct {
 const (
 	UploadFile        UploadType = "file"
 	UploadDirChild    UploadType = "dir-child"
-	UploadDirManifest UploadType = "dir-manifest"
+	UploadDirManifest UploadType = "dir-struct"
 )
 
 func (a APIResponse) String() string {
@@ -111,7 +113,7 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)
 	}
-	req.Header.Set("Directory", string(dirFlag))
+	req.Header.Set("InputType", string(dirFlag))
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
@@ -126,8 +128,8 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 	return &out, nil
 }
 
-func (c *Client) Download(id, path string) error {
-	req, err := http.NewRequest("POST", c.Config.Server+"download?id="+id, nil)
+func (c *Client) Download(uuid, path string) error {
+	req, err := http.NewRequest("POST", c.Config.Server+"download?uuid="+uuid, nil)
 	if err != nil {
 		return err
 	}
@@ -729,28 +731,47 @@ func cmdDownload(c *Client, args []string) {
 		return
 	}
 
+	files, err := getFiles(c)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	for _, i := range args {
+		fmt.Println("   hehe: ", i)
+	}
+	for _, i := range files {
+		fmt.Println("   hehe: ", i)
+	}
+
 	var fileIDs []string
 	if args[0] == "all" {
-		files, err := getFiles(c)
-		if err != nil {
-			fmt.Println("error:", err)
-			return
-		}
 		for _, f := range files {
-			if id, ok := f["id"].(string); ok {
-				fileIDs = append(fileIDs, id)
+			if uuid, ok := f["uuid"].(string); ok {
+				fileIDs = append(fileIDs, uuid)
 			}
 		}
 	} else {
-		fileIDs = args
+		for _, f := range files {
+			id := fmt.Sprint(f["id"])
+			if slices.Contains(args, id) {
+				if uuid, ok := f["uuid"].(string); ok {
+					fileIDs = append(fileIDs, uuid)
+					fmt.Printf("%s %s debug booger man\n", id, uuid)
+				}
+			}
+		}
 	}
 
+	fmt.Println("what da helly", len(files), len(fileIDs))
+
+	//!!!! fileIDS now has uuids =, could be bothered refactoring
 	for _, id := range fileIDs {
 		if err := c.Download(id, c.Config.SaveDir); err != nil {
 			fmt.Printf("ID %s\terror: %v\n", id, err)
 			continue
 		}
-		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err != nil {
+		if resp, err := c.Send("DELETE", "delete?uuid="+id, nil); err != nil {
 			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
 			continue
 		} else if !resp.Success {

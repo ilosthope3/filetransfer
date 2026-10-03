@@ -25,12 +25,14 @@ import (
 
 type (
 	Config struct {
-		TokensFile           string
-		SaveDir              string
-		MaxFormSize          int64
-		Password             string
-		AllowCrossUserDelete bool
-		CleanIntervalMins    int
+		TokensFile            string
+		SaveDir               string
+		MaxFormSize           int64
+		Password              string
+		AllowCrossUserDelete  bool
+		CleanIntervalMins     int
+		DeleteGracePeriodMins int
+		ServerPort            string
 	}
 	APIResponse struct {
 		Success bool        `json:"success"`
@@ -53,6 +55,11 @@ type (
 	FullReturn struct {
 		Files []FileMeta `json:"files"`
 		Links []LinkMeta `json:"links"`
+	}
+	Dir struct {
+		Files   []string `json:"files"`
+		DirName string   `json:"name"`
+		Dirs    []Dir    `json:"dirs,omitempty"`
 	}
 )
 
@@ -94,11 +101,12 @@ func authenticate(r *http.Request) (UserRecord, error) {
 	}
 	token := parts[1]
 	row.Token = token
-	err := DB.QueryRow("SELECT id, username from USERS WHERE TOKEN = ?", token).Scan(&row.ID, &row.Name)
+	err := DB.QueryRow("SELECT id, username FROM users WHERE TOKEN = ?", token).Scan(&row.ID, &row.Name)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return row, errors.New("invalid token")
 		}
+		fmt.Printf("random err in auth func: %v\n", err)
 		return row, errors.New("db error during euth service")
 
 	}
@@ -113,6 +121,8 @@ func mainInit() {
 	appConfig.Password = "123"
 	appConfig.AllowCrossUserDelete = true
 	appConfig.CleanIntervalMins = 60
+	appConfig.DeleteGracePeriodMins = 1
+	appConfig.ServerPort = ":7842"
 
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
 		log.Fatalf("create save dir: %v", err)
@@ -148,12 +158,13 @@ func cleanUp() error {
 		if err != nil {
 			return 0, err
 		}
-
+		cutoff := time.Now().Add(-time.Duration(appConfig.DeleteGracePeriodMins) * time.Minute)
 		rows, err := DB.Query(`
 			SELECT uuid FROM items
-			WHERE consumed = FALSE
-				OR (consumed = TRUE AND consumed_at >= ?)
-		`, time.Now().Add(-24*time.Hour))
+			WHERE (type = 'dir-child' AND (is_child OR uploaded_at >= ?))
+				OR (NOT(type = 'dir-child') AND (consumed = FALSE OR (consumed = TRUE AND consumed_at >= ?)))
+		`, cutoff,
+			cutoff)
 		if err != nil && err != sql.ErrNoRows {
 			return 0, err
 		}
@@ -320,27 +331,27 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		sendJSON(w, false, http.StatusBadRequest, "1 file at a time, or use send dir")
 		return
 	}
-	typeDir := r.Header.Get("Directory")
+	inputType := r.Header.Get("InputType")
 
-	if !slices.Contains([]string{"file", "dir-child", "dir-manifest"}, typeDir) {
-		sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
+	if !slices.Contains([]string{"file", "dir-child", "dir-struct", "link"}, inputType) {
+		sendJSON(w, false, http.StatusInternalServerError, "inputType header wrong")
 		return
 	}
 
 	fileUUID := uuid.New().String()
-	if link != "" {
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_dir) VALUES (?, ?, ?, ?, ?, ?,?,?);",
+	if inputType == "link" {
+		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?,?,?);",
 			fileUUID,
 			sender.ID,
 			receiver_id,
-			"link",
+			inputType,
 			link,
-			time.Now().Format("2006-01-02 15:04"),
+			time.Now().Format("2006-01-02 15:04:57"),
 			false,
-			typeDir,
+			false,
 		)
 		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
+			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert (link)")
 			return
 		}
 
@@ -370,23 +381,78 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_dir) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
 			fileUUID,
 			sender.ID,
 			receiver_id,
-			"file",
+			inputType,
 			filepath.Base(fileHeader.Filename),
 			fileHeader.Size,
-			time.Now().Format("2006-01-02 15:04"),
+			time.Now().Format("2006-01-02 15:04:57"),
 			false,
-			typeDir,
+			false,
 		)
 		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert")
+			fmt.Printf("DB insert failed: %v", err)
+			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert (file)")
 			return
 		}
 
 		fmt.Printf("file saved")
+
+		if inputType == "dir-struct" {
+			file.Close()
+			file, err = os.Open(filepath.Join(appConfig.SaveDir, fileUUID))
+			if err != nil {
+				sendJSON(w, false, http.StatusInternalServerError, "failed to reopen manifest")
+				return
+			}
+			defer file.Close()
+
+			var root Dir
+
+			if err := json.NewDecoder(file).Decode(&root); err != nil {
+				fmt.Printf("manifest shit failed: %v", err)
+				sendJSON(w, false, http.StatusBadRequest, "Invalid directory manifest")
+				return
+			}
+
+			uuids := []string{}
+			var gatherUUIDs func(Dir) []string
+			gatherUUIDs = func(curr Dir) []string {
+				var r = []string{}
+				for _, d := range curr.Dirs {
+					r = append(r, gatherUUIDs(d)...)
+				}
+				return append(r, curr.Files...)
+			}
+
+			uuids = append(uuids, gatherUUIDs(root)...)
+
+			args := make([]any, len(uuids))
+			placeholders := make([]string, len(uuids))
+
+			for i, uuid := range uuids {
+				placeholders[i] = "?"
+				args[i] = uuid
+			}
+
+			query := fmt.Sprintf(`
+				UPDATE items
+				SET is_child = TRUE
+				WHERE uuid IN (%s)
+			`, strings.Join(placeholders, ","))
+
+			_, err := DB.Exec(query, args...)
+			if err != nil {
+				sendJSON(w, false, http.StatusInternalServerError, fmt.Sprintf("unknown db error: %v\n", err))
+				return
+			}
+		}
+
+	} else {
+		sendJSON(w, false, http.StatusInternalServerError, "unknown error when saving couldnt define input type")
+		return
 	}
 
 	sendJSON(w, true, http.StatusOK, fileUUID)
@@ -447,9 +513,9 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 	files := []FileRecord{}
 
 	rows, err := DB.Query(
-		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at, is_dir
+		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at, is_child
 		FROM items
-		WHERE receiver_id = ? AND consumed = FALSE AND NOT(is_dir = "dir-child")`,
+		WHERE receiver_id = ? AND consumed = FALSE AND NOT(type = 'dir-child')`,
 		device.ID,
 	)
 	if err != nil {
@@ -472,7 +538,7 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 			&f.UploadedAt,
 			&f.Consumed,
 			&f.ConsumedAt,
-			&f.DirType,
+			&f.IsChild,
 		); err != nil {
 			log.Printf("scan item: %v", err)
 			continue
@@ -495,22 +561,22 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
+	uuid := r.URL.Query().Get("uuid")
+	if uuid == "" {
 		sendJSON(w, false, http.StatusBadRequest, "missing id parameter")
 		return
 	}
 
 	var res sql.Result
-	if id == "all" {
+	if uuid == "all" {
 		res, err = DB.Exec(
 			`UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND consumed = FALSE`,
 			time.Now(), device.ID,
 		)
 	} else {
 		res, err = DB.Exec(
-			`UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND id = ? AND consumed = FALSE`,
-			time.Now(), device.ID, id,
+			`UPDATE items SET consumed = TRUE, consumed_at = ? WHERE receiver_id = ? AND uuid = ? AND consumed = FALSE`,
+			time.Now(), device.ID, uuid,
 		)
 	}
 	if err != nil {
@@ -566,26 +632,31 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := r.URL.Query().Get("id")
-	if id == "" {
+	uuid := r.URL.Query().Get("uuid")
+	if uuid == "" {
 		sendJSON(w, false, http.StatusBadRequest, "missing id")
 		return
 	}
 
 	var f FileRecord
 	err = DB.QueryRow(
-		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url, uploaded_at, consumed, consumed_at, is_dir
-     FROM items
-     WHERE receiver_id = ? AND consumed = FALSE AND id = ? AND is_dir`,
-		device.ID, id,
+		`SELECT id, uuid, sender_id, receiver_id, type, filename, size, url,
+			uploaded_at, consumed, consumed_at, is_child
+    FROM items
+    WHERE receiver_id = ?
+      AND uuid = ?
+      AND consumed = FALSE
+      AND (NOT(type = 'dir-child') OR is_child)`,
+		device.ID, uuid,
 	).Scan(&f.ID, &f.UUID, &f.SenderID, &f.ReceiverID, &f.Type,
-		&f.Filename, &f.Size, &f.URL, &f.UploadedAt, &f.Consumed, &f.ConsumedAt, &f.DirType)
+		&f.Filename, &f.Size, &f.URL, &f.UploadedAt, &f.Consumed, &f.ConsumedAt, &f.IsChild)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			sendJSON(w, false, http.StatusBadRequest, "no such id found")
 			return
 		}
-		sendJSON(w, false, http.StatusInternalServerError, "db error during euth service")
+		fmt.Printf("err123456: %v\n", err)
+		sendJSON(w, false, http.StatusInternalServerError, "db error idgaf")
 		return
 	}
 
@@ -634,5 +705,20 @@ func main() {
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/download", handleDownload)
 	http.HandleFunc("/delete-user", handleDeleteUser)
-	http.ListenAndServe(":7842", nil)
+
+	server := &http.Server{
+		Addr: appConfig.ServerPort,
+	}
+
+	go func() {
+		<-ctx.Done()
+
+		fmt.Println("shutting down server...")
+		server.Shutdown(context.Background())
+	}()
+
+	err := server.ListenAndServe()
+	if err != nil && err != http.ErrServerClosed {
+		log.Fatal(err)
+	}
 }

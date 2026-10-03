@@ -19,7 +19,7 @@ type FileRecord struct {
 	ConsumedAt *string `json:"consumed_at"`
 	Type       string  `json:"type"`
 	URL        *string `json:"url,omitempty"`
-	DirType    *string `json:"dir_type,omitempty"`
+	IsChild    bool    `json:"is_child,omitempty"`
 }
 
 type UserRecord struct {
@@ -49,14 +49,14 @@ func InitDB(path string) {
     uuid           TEXT UNIQUE NOT NULL,
     sender_id      INTEGER NOT NULL REFERENCES users(id),
     receiver_id    INTEGER NOT NULL REFERENCES users(id),
-    type           TEXT NOT NULL CHECK (type IN ('file', 'link')),
+    type           TEXT NOT NULL CHECK (type IN ('file', 'link', 'dir-struct', 'dir-child')),
     filename       TEXT,
     size           INTEGER, 
-    url            TEXT, 
+    url            TEXT,
     uploaded_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
     consumed       BOOLEAN DEFAULT FALSE,
     consumed_at    DATETIME,
-		is_dir         TEXT
+		is_child         BOOLEAN DEFAULT FALSE
 	);`
 
 	if _, err := DB.Exec(schema); err != nil {
