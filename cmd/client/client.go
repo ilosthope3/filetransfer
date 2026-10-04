@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,45 +13,47 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-
 	"strings"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
-type ClientConfig struct {
-	Server              string `json:"server"`
-	TimeoutSeconds      int    `json:"timeout_seconds"`
-	SaveDir             string `json:"save_dir"`
-	AutoDownload        bool   `json:"autodownload"`
-	PollIntervalSeconds int    `json:"poll_interval_seconds"`
-}
+type (
+	ClientConfig struct {
+		Server              string `json:"server"`
+		TimeoutSeconds      int    `json:"timeout_seconds"`
+		SaveDir             string `json:"save_dir"`
+		AutoDownload        bool   `json:"autodownload"`
+		PollIntervalSeconds int    `json:"poll_interval_seconds"`
+	}
+	UploadType string
 
-type UploadType string
-
-type APIResponse struct {
-	Success bool        `json:"success"`
-	Data    interface{} `json:"data,omitempty"`
-	Error   string      `json:"error,omitempty"`
-}
-
-type Client struct {
-	Token  string
-	Name   string
-	Client http.Client
-	Config ClientConfig
-}
-
-type Dir struct {
-	Files   []string `json:"files"`
-	DirName string   `json:"name"`
-	Dirs    []Dir    `json:"dirs,omitempty"`
-}
+	APIResponse struct {
+		Success bool        `json:"success"`
+		Data    interface{} `json:"data,omitempty"`
+		Error   string      `json:"error,omitempty"`
+	}
+	Client struct {
+		Token  string
+		Name   string
+		Client http.Client
+		Config ClientConfig
+	}
+	Dir struct {
+		Files   []string `json:"files"`
+		DirName string   `json:"name"`
+		Dirs    []Dir    `json:"dirs,omitempty"`
+	}
+)
 
 const (
 	UploadFile        UploadType = "file"
 	UploadDirChild    UploadType = "dir-child"
 	UploadDirManifest UploadType = "dir-struct"
 )
+
+var ()
 
 func (a APIResponse) String() string {
 	r, err := json.MarshalIndent(a, "", "  ")
@@ -128,35 +129,40 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 	return &out, nil
 }
 
-func (c *Client) Download(uuid, path string) error {
+func (c *Client) Download(uuid, path string) (string, error) {
+
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", err
+	}
+
 	req, err := http.NewRequest("POST", c.Config.Server+"download?uuid="+uuid, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("server %d: %s", resp.StatusCode, body)
+		return "", fmt.Errorf("server %d: %s", resp.StatusCode, body)
 	}
 
 	cd := resp.Header.Get("Content-Disposition")
 	if cd == "" {
-		return fmt.Errorf("server sent no Content-Disposition")
+		return "", fmt.Errorf("server sent no Content-Disposition")
 	}
 	_, params, err := mime.ParseMediaType(cd)
 	if err != nil {
-		return fmt.Errorf("bad Content-Disposition %q: %w", cd, err)
+		return "", fmt.Errorf("bad Content-Disposition %q: %w", cd, err)
 	}
 	name := params["filename"]
 	if name == "" {
-		return fmt.Errorf("no filename in %q", cd)
+		return "", fmt.Errorf("no filename in %q", cd)
 	}
 	name = filepath.Base(name)
 
@@ -170,7 +176,7 @@ func (c *Client) Download(uuid, path string) error {
 			break
 		}
 		if err != nil {
-			return fmt.Errorf("stat %s: %w", dest, err)
+			return "", fmt.Errorf("stat %s: %w", dest, err)
 		}
 		dest = filepath.Join(path,
 			fmt.Sprintf("%s (%d)%s", base, i, ext))
@@ -178,18 +184,18 @@ func (c *Client) Download(uuid, path string) error {
 
 	out, err := os.Create(dest)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer out.Close()
 
 	n, err := io.Copy(out, resp.Body)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if resp.ContentLength >= 0 && n != resp.ContentLength {
-		return fmt.Errorf("short read: %d/%d", n, resp.ContentLength)
+		return "", fmt.Errorf("short read: %d/%d", n, resp.ContentLength)
 	}
-	return out.Close()
+	return dest, out.Close()
 }
 
 func (c *Client) Init() {
@@ -416,6 +422,8 @@ func main() {
 		cmdDeleteUser(&c, args)
 	case "dir":
 		cmdDir(&c, args)
+	case "daemon":
+		runDaemon(&c)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", cmd)
 		cmdHelp()
@@ -435,6 +443,7 @@ func cmdHelp() {
     file <receiver>:<path>     send a file
     text <receiver>:<url>      send a link
     dir  <reciever>:<path>     send a folder
+		daemon                     launches autodownload
     cfg                        current config and config path
     help                       this menu`)
 	fmt.Println()
@@ -744,11 +753,13 @@ func cmdDownload(c *Client, args []string) {
 		fmt.Println("   hehe: ", i)
 	}
 
-	var fileIDs []string
+	fileItems := map[string]string{}
 	if args[0] == "all" {
 		for _, f := range files {
 			if uuid, ok := f["uuid"].(string); ok {
-				fileIDs = append(fileIDs, uuid)
+				if t, ok := f["type"].(string); ok {
+					fileItems[uuid] = t
+				}
 			}
 		}
 	} else {
@@ -756,30 +767,78 @@ func cmdDownload(c *Client, args []string) {
 			id := fmt.Sprint(f["id"])
 			if slices.Contains(args, id) {
 				if uuid, ok := f["uuid"].(string); ok {
-					fileIDs = append(fileIDs, uuid)
-					fmt.Printf("%s %s debug booger man\n", id, uuid)
+					if t, ok := f["type"].(string); ok {
+						fileItems[uuid] = t
+					}
 				}
 			}
 		}
 	}
 
-	fmt.Println("what da helly", len(files), len(fileIDs))
-
-	//!!!! fileIDS now has uuids =, could be bothered refactoring
-	for _, id := range fileIDs {
-		if err := c.Download(id, c.Config.SaveDir); err != nil {
-			fmt.Printf("ID %s\terror: %v\n", id, err)
+	for uuid, fileType := range fileItems {
+		savePath, err := c.Download(uuid, c.Config.SaveDir)
+		if err != nil {
+			fmt.Printf("ID %s\terror: %v\n", uuid, err)
 			continue
 		}
-		if resp, err := c.Send("DELETE", "delete?uuid="+id, nil); err != nil {
-			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, err)
+		if resp, err := c.Send("DELETE", "delete?uuid="+uuid, nil); err != nil {
+			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, err)
 			continue
 		} else if !resp.Success {
-			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", id, resp.Error)
+			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, resp.Error)
 			continue
 		}
+		fmt.Printf("ID %s\tOK\n", uuid)
 
-		fmt.Printf("ID %s\tOK\n", id)
+		if fileType == string(UploadDirManifest) {
+			file, err := os.Open(savePath)
+			if err != nil {
+				fmt.Printf("error opening saved file manifest %v\n", err)
+				return
+			}
+
+			var dir Dir
+			if err := json.NewDecoder(file).Decode(&dir); err != nil {
+				fmt.Printf("error parsing manifest file into var %v\n", err)
+				return
+			}
+			file.Close()
+
+			//ok jesus this logic better work
+
+			var parseDirStruct func(Dir, string) error
+
+			parseDirStruct = func(curr Dir, directory string) error {
+
+				currSave := filepath.Join(directory, curr.DirName)
+				for _, uuid := range curr.Files {
+					_, err := c.Download(uuid, currSave)
+					if err != nil {
+						return err
+					}
+				}
+				for _, newDir := range curr.Dirs {
+					err := parseDirStruct(newDir, currSave)
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			err = parseDirStruct(dir, c.Config.SaveDir)
+			if err != nil {
+				fmt.Printf("error when saving a dir type: %v\n", err)
+				return
+			}
+
+			if err := os.Remove(savePath); err != nil {
+				fmt.Printf("error when removing dir struct file: %v\n", err)
+				return
+			}
+
+			fmt.Println("saving dir ok !!!")
+		}
 	}
 }
 
@@ -852,15 +911,33 @@ func cmdDeleteUser(c *Client, args []string) {
 
 }
 
-func runDaemon(ctx context.Context, c *Client) {
-	t := time.NewTicker(time.Duration(c.Config.PollIntervalSeconds))
-	defer t.Stop()
+func runDaemon(c *Client) {
+
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer "+c.Token)
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://localhost:7842/ws",
+		headers,
+	)
+	if err != nil {
+		fmt.Println("connection failed:", err)
+		return
+	}
+	defer conn.Close()
+
+	fmt.Println("connected to server")
+
 	for {
-		select {
-		case <-ctx.Done():
+		msgType, msg, err := conn.ReadMessage()
+		if err != nil {
+			fmt.Println("connection lost:", err)
 			return
-		case <-t.C:
+		}
+
+		if msgType == websocket.TextMessage && string(msg) == "NEW FILES" {
 			cmdDownload(c, []string{"all"})
 		}
+
+		fmt.Println("server:", string(msg))
 	}
 }

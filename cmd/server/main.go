@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 type (
@@ -61,10 +62,19 @@ type (
 		DirName string   `json:"name"`
 		Dirs    []Dir    `json:"dirs,omitempty"`
 	}
+	WsMessage struct {
+		MsgType int
+		Data    []byte
+	}
 )
 
 var (
-	appConfig Config
+	appConfig    Config
+	connUpgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			return true
+		},
+	}
 )
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -685,6 +695,121 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
 }
 
+func handleWebsocket(w http.ResponseWriter, r *http.Request) {
+
+	// load this shit from config later (once you move to event handling it might change)
+	const keepAliveSecs = 30
+	const queryIntervalSecs = 5
+
+	device, err := authenticate(r)
+	if err != nil {
+		sendJSON(w, false, http.StatusUnauthorized, "Unauthorised")
+		return
+	}
+
+	conn, err := connUpgrader.Upgrade(w, r, nil)
+	if err != nil {
+		log.Println("upgrade:", err)
+		return
+	}
+	defer conn.Close()
+
+	log.Println("client connected")
+
+	conn.SetReadDeadline(time.Now().Add(2 * keepAliveSecs * time.Second))
+
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(2 * keepAliveSecs * time.Second))
+		return nil
+	})
+
+	tickerKeepAlive := time.NewTicker(keepAliveSecs * time.Second)
+	defer tickerKeepAlive.Stop()
+
+	tickerInbox := time.NewTicker(queryIntervalSecs * time.Second)
+	defer tickerInbox.Stop()
+
+	messageQueue := make(chan WsMessage)
+
+	done := make(chan struct{})
+	defer close(done)
+
+	// goroutine for ping pong pings
+	go func() {
+		for {
+			select {
+			case <-tickerKeepAlive.C:
+				select {
+				case messageQueue <- WsMessage{
+					MsgType: websocket.PingMessage,
+					Data:    nil,
+				}:
+				case <-done:
+					return
+				}
+
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case <-tickerInbox.C:
+				var inboxCounter int
+				err := DB.QueryRow(
+					`SELECT COUNT(*) FROM items WHERE receiver_id = ? AND consumed = FALSE AND NOT(type = 'dir-child')`, device.ID,
+				).Scan(&inboxCounter)
+
+				if err != nil {
+					fmt.Printf("goroutine db query error: %v\n", err)
+				}
+
+				if inboxCounter != 0 {
+					select {
+					case messageQueue <- WsMessage{
+						MsgType: websocket.TextMessage,
+						Data:    []byte("NEW FILES"),
+					}:
+					case <-done:
+						return
+					}
+
+				}
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	go func() {
+		for {
+			select {
+			case msg := <-messageQueue:
+				if err := conn.WriteMessage(msg.MsgType, msg.Data); err != nil {
+					fmt.Printf("sending goroutine errored: %v\n", err)
+					return
+				}
+
+			case <-done:
+				return
+			}
+		}
+	}()
+
+	for {
+		_, msg, err := conn.ReadMessage()
+		if err != nil {
+			log.Println("client disconnected:", err)
+			return
+		}
+
+		log.Println("received:", string(msg))
+	}
+}
+
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
@@ -705,6 +830,7 @@ func main() {
 	http.HandleFunc("/delete", handleDelete)
 	http.HandleFunc("/download", handleDownload)
 	http.HandleFunc("/delete-user", handleDeleteUser)
+	http.HandleFunc("/ws", handleWebsocket)
 
 	server := &http.Server{
 		Addr: appConfig.ServerPort,
