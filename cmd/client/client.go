@@ -423,7 +423,7 @@ func main() {
 	case "dir":
 		cmdDir(&c, args)
 	case "daemon":
-		runDaemon(&c)
+		runDaemon(&c, args)
 	default:
 		fmt.Printf("Unknown command: %s\n\n", cmd)
 		cmdHelp()
@@ -474,7 +474,7 @@ func cmdAuth(c *Client, args []string) error {
 	return nil
 }
 
-func cmdDevices(c *Client, args []string) {
+func cmdDevices(c *Client, _ []string) {
 	r, err := c.Send("GET", "devices", nil)
 	if err != nil {
 		fmt.Println("error:", err)
@@ -513,7 +513,7 @@ func cmdDevices(c *Client, args []string) {
 	fmt.Println()
 }
 
-func cmdFiles(c *Client, args []string) {
+func cmdFiles(c *Client, _ []string) {
 
 	fmt.Println("\n  INBOX:")
 	list, err := getFiles(c)
@@ -542,16 +542,19 @@ func cmdFiles(c *Client, args []string) {
 
 		if t, _ := row["type"].(string); t == "link" {
 			text := fmt.Sprintf("%v", row["url"])
-			fmt.Printf("    [%s] T  %-60s  from [%s]  %s\n", id, truncate(text, 60), sender, date)
-		} else {
+			fmt.Printf("    [%s] Te  %-60s  from [%s]  %s\n", id, truncate(text, 60), sender, date)
+		} else if t == "file" {
 			name := fmt.Sprintf("%v", row["filename"])
-			fmt.Printf("    [%s] F  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
+			fmt.Printf("    [%s] Fi  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
+		} else {
+			name := strings.TrimSuffix(fmt.Sprintf("%v", row["filename"]), ".json") + "/"
+			fmt.Printf("    [%s] Di  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
 		}
 	}
 	fmt.Println()
 }
 
-func cmdWho(c *Client, args []string) {
+func cmdWho(c *Client, _ []string) {
 	r, err := c.Send("GET", "whoami", nil)
 	if err != nil {
 		fmt.Println("error:", err)
@@ -877,7 +880,7 @@ func cmdDelete(c *Client, args []string) {
 
 }
 
-func cmdEditCFG(c *Client, args []string) {
+func cmdEditCFG(c *Client, _ []string) {
 	b, err := json.MarshalIndent(c.Config, "", "  ")
 	if err != nil {
 		fmt.Println("error:", err)
@@ -911,7 +914,7 @@ func cmdDeleteUser(c *Client, args []string) {
 
 }
 
-func runDaemon(c *Client) {
+func runDaemon(c *Client, _ []string) {
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.Token)
