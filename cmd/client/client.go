@@ -45,6 +45,10 @@ type (
 		DirName string   `json:"name"`
 		Dirs    []Dir    `json:"dirs,omitempty"`
 	}
+	Device struct {
+		ID   int64
+		Name string
+	}
 )
 
 const (
@@ -325,7 +329,7 @@ func getFiles(c *Client) ([]map[string]any, error) {
 	return list, nil
 }
 
-func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, error) {
+func buildUploadBody(receivers []string, filePath, link string) (*bytes.Buffer, string, error) {
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
 
@@ -348,13 +352,19 @@ func buildUploadBody(receiver, filePath, link string) (*bytes.Buffer, string, er
 	if link != "" {
 		w.WriteField("text", link)
 	}
-	w.WriteField("receiver", receiver)
+
+	recData, err := json.Marshal(receivers)
+	if err != nil {
+		fmt.Printf("error encoding receivers into json: %v\n", err)
+	}
+
+	w.WriteField("receivers", string(recData))
 	w.Close()
 
 	return &body, w.FormDataContentType(), nil
 }
 
-func buildDirManifestBody(receiver string, root Dir) (*bytes.Buffer, string, error) {
+func buildDirManifestBody(receivers []string, root Dir) (*bytes.Buffer, string, error) {
 	var jsonBody bytes.Buffer
 
 	err := json.NewEncoder(&jsonBody).Encode(root)
@@ -374,9 +384,12 @@ func buildDirManifestBody(receiver string, root Dir) (*bytes.Buffer, string, err
 		return nil, "", err
 	}
 
-	if err := w.WriteField("receiver", receiver); err != nil {
-		return nil, "", err
+	recData, err := json.Marshal(receivers)
+	if err != nil {
+		fmt.Printf("error encoding receivers into json: %v\n", err)
 	}
+
+	w.WriteField("receivers", string(recData))
 
 	if err := w.Close(); err != nil {
 		return nil, "", err
@@ -474,39 +487,48 @@ func cmdAuth(c *Client, args []string) error {
 	return nil
 }
 
-func cmdDevices(c *Client, _ []string) {
+func getDevices(c *Client) ([]Device, error) {
+	devices := []Device{}
+
 	r, err := c.Send("GET", "devices", nil)
 	if err != nil {
-		fmt.Println("error:", err)
-		return
+		return devices, err
 	}
 	list, ok := r.Data.([]any)
 	if !ok {
-		fmt.Println("unexpected response shape")
-		return
+		return devices, fmt.Errorf("unexpected response shape")
 	}
 
-	type Device struct {
-		ID   float64
-		Name string
-	}
-
-	var devices []Device
 	for _, entry := range list {
 		dev, ok := entry.(map[string]any)
 		if !ok {
 			continue
 		}
-		id, _ := dev["id"].(float64)
-		name, _ := dev["name"].(string)
-		devices = append(devices, Device{ID: id, Name: name})
+		id, ok := dev["id"].(float64)
+		if !ok {
+			return devices, fmt.Errorf("invalid device id")
+		}
+
+		name, ok := dev["name"].(string)
+		if !ok {
+			return devices, fmt.Errorf("invalid device name")
+		}
+		devices = append(devices, Device{ID: int64(id), Name: name})
 	}
 
 	sort.Slice(devices, func(i, j int) bool {
 		return devices[i].ID < devices[j].ID
 	})
+	return devices, nil
+}
 
+func cmdDevices(c *Client, _ []string) {
 	fmt.Println("\n  DEVICES:")
+	devices, err := getDevices(c)
+	if err != nil {
+		fmt.Printf("error when fetching devices: %v\n", err)
+		return
+	}
 	for _, d := range devices {
 		fmt.Printf("    [%v] %v\n", d.ID, d.Name)
 	}
@@ -578,20 +600,31 @@ func cmdWho(c *Client, _ []string) {
 }
 
 func cmdDir(c *Client, args []string) {
-	if len(args) != 1 {
-		fmt.Println("filetransfer dir <receiver>:<path>")
+
+	if len(args) < 2 {
+		fmt.Println("filetransfer dir <path> <receiver> [<receiver]")
 		os.Exit(1)
 	}
 
-	receiver, path, found := strings.Cut(args[0], ":")
-	if !found {
-		fmt.Println("Format must be <receiver>:<path>")
-		os.Exit(1)
+	path := args[0]
+	receivers := args[1:]
+	if receivers[0] == "all" {
+		receivers = []string{}
+		devices, err := getDevices(c)
+		if err != nil {
+			fmt.Printf("error when fetching devices: %v\n", err)
+		}
+		for _, r := range devices {
+			receivers = append(receivers, r.Name)
+		}
 	}
 
 	f, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		fmt.Println("no such path found")
+		os.Exit(1)
+	} else if err != nil {
+		fmt.Printf("unkown error when os.Stat: %v\n", err)
 		os.Exit(1)
 	}
 
@@ -600,6 +633,22 @@ func cmdDir(c *Client, args []string) {
 		os.Exit(1)
 	}
 
+	type Rec struct {
+		Name    string `json:"name"`
+		Error   string `json:"error"`
+		ID      int64  `json:"id"`
+		Errored bool   `json:"errored"`
+	}
+
+	type UploadResult struct {
+		UUID      string `json:"uuid"`
+		Receivers []Rec  `json:"receivers"`
+	}
+
+	receiverMap := map[string]bool{} // false 0,..,n-1/n, true n/n success case
+	for _, r := range receivers {
+		receiverMap[r] = true
+	}
 	var traverseDir func(string) Dir
 	traverseDir = func(path string) Dir {
 
@@ -618,24 +667,36 @@ func cmdDir(c *Client, args []string) {
 				r.Dirs = append(r.Dirs, traverseDir(filepath.Join(path, item.Name())))
 			} else {
 				cpath := filepath.Join(path, item.Name())
-				body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), strings.TrimSpace(cpath), "")
+				body, contentType, err := buildUploadBody(receivers, strings.TrimSpace(cpath), "")
 				if err != nil {
 					fmt.Printf("error building body: %s\n%v\n", cpath, err)
-					continue
+					os.Exit(1)
 				}
 
 				resp, err := c.SendRaw("POST", "upload", contentType, body, UploadDirChild)
 				if err != nil {
 					fmt.Printf("error uploading: %s\n%v\n", cpath, err)
-					continue
+					os.Exit(1)
 				}
 				if !resp.Success {
 					fmt.Printf("error: %s\n%v\n", cpath, resp.Error)
-					continue
+					os.Exit(1)
 				}
 
-				r.Files = append(r.Files, resp.Data.(string))
+				var result UploadResult
 
+				if err := json.Unmarshal([]byte(resp.Data.(string)), &result); err != nil {
+					fmt.Printf("error unmarshalling response data: %v\n", err)
+					os.Exit(1)
+				}
+
+				r.Files = append(r.Files, result.UUID)
+
+				for _, rec := range result.Receivers {
+					if rec.Errored {
+						receiverMap[rec.Name] = false
+					}
+				}
 			}
 		}
 
@@ -650,10 +711,30 @@ func cmdDir(c *Client, args []string) {
 
 	root := traverseDir(path)
 
-	body, contentType, err := buildDirManifestBody(receiver, root)
+	validReceivers := []string{}
+	for key, val := range receiverMap {
+		if val {
+			validReceivers = append(validReceivers, key)
+		}
+	}
+
+	if len(validReceivers) == 0 {
+		fmt.Println("no valid receivers when sending dir")
+		return
+	}
+
+	body, contentType, err := buildDirManifestBody(validReceivers, root)
 	if err != nil {
 		fmt.Printf("error building manifest: %v\n", err)
 		return
+	}
+
+	for key, val := range receiverMap {
+		if !val {
+			fmt.Printf("file sending error for %v\n", key)
+		} else {
+			fmt.Printf("%v files sent ok, now manifest\n", key)
+		}
 	}
 
 	resp, err := c.SendRaw(
@@ -672,23 +753,44 @@ func cmdDir(c *Client, args []string) {
 		fmt.Printf("error server: %v\n", resp.Error)
 		os.Exit(1)
 	}
-	fmt.Println("dir saved ok")
+
+	var result UploadResult
+
+	if err := json.Unmarshal([]byte(resp.Data.(string)), &result); err != nil {
+		fmt.Printf("error unmarshalling response data: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, r := range result.Receivers {
+		if r.Errored {
+			fmt.Printf("manifest sending error for %v: %v\n", r.Name, r.Error)
+		} else {
+			fmt.Printf("%v manifest sent ok\n", r.Name)
+		}
+	}
 
 }
 
 func cmdSend(c *Client, args []string) {
-	if len(args) != 1 {
-		fmt.Println("filetransfer send <receiver>:<path>")
+	if len(args) < 2 {
+		fmt.Println("filetransfer send <path> <receiver> [<receiver]")
 		os.Exit(1)
 	}
 
-	receiver, path, found := strings.Cut(args[0], ":")
-	if !found {
-		fmt.Println("Format must be <receiver>:<path>")
-		os.Exit(1)
+	path := args[0]
+	receivers := args[1:]
+	if receivers[0] == "all" {
+		receivers = []string{}
+		devices, err := getDevices(c)
+		if err != nil {
+			fmt.Printf("error when fetching devices: %v\n", err)
+		}
+		for _, r := range devices {
+			receivers = append(receivers, r.Name)
+		}
 	}
 
-	body, contentType, err := buildUploadBody(strings.TrimSpace(receiver), strings.TrimSpace(path), "")
+	body, contentType, err := buildUploadBody(receivers, strings.TrimSpace(path), "")
 	if err != nil {
 		fmt.Println("error building body:", err)
 		os.Exit(1)
@@ -707,19 +809,26 @@ func cmdSend(c *Client, args []string) {
 }
 
 func cmdLink(c *Client, args []string) {
-	if len(args) < 1 {
-		fmt.Println("filetransfer link <receiver>:<url>")
+
+	if len(args) < 2 {
+		fmt.Println(`filetransfer link "<url>" <receiver> [<receiver]`)
 		os.Exit(1)
 	}
 
-	inp := strings.Join(args, " ")
-	receiver, url, found := strings.Cut(inp, ":")
-	if !found {
-		fmt.Println("Format must be <receiver>:<url>")
-		os.Exit(1)
+	url := args[0]
+	receivers := args[1:]
+	if receivers[0] == "all" {
+		receivers = []string{}
+		devices, err := getDevices(c)
+		if err != nil {
+			fmt.Printf("error when fetching devices: %v\n", err)
+		}
+		for _, r := range devices {
+			receivers = append(receivers, r.Name)
+		}
 	}
 
-	body, contentType, err := buildUploadBody(receiver, "", url)
+	body, contentType, err := buildUploadBody(receivers, "", url)
 	if err != nil {
 		fmt.Println("error building body:", err)
 		os.Exit(1)

@@ -314,21 +314,42 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	link := r.FormValue("text")
 	// fmt.Println(link)
-	receiver := r.FormValue("receiver")
 
-	if receiver == "" || receiver == "." || receiver == ".." {
+	var receivers []string
+	if err := json.Unmarshal([]byte(r.FormValue("receiver")), &receivers); err != nil {
+		sendJSON(w, false, http.StatusInternalServerError, "error decoding receivers from json")
+		return
+	}
+	if len(receivers) == 0 {
 		sendJSON(w, false, http.StatusBadRequest, "Invalid receiver")
 		return
 	}
 
-	var receiver_id int64
-	if err = DB.QueryRow("SELECT id FROM users WHERE username = ? ", receiver).Scan(&receiver_id); err != nil {
-		if err == sql.ErrNoRows {
-			sendJSON(w, false, http.StatusBadRequest, "No such receiver")
-			return
+	type Rec struct {
+		Name    string `json:"name"`
+		Error   string `json:"error"`
+		ID      int64  `json:"id"`
+		Errored bool   `json:"errored"`
+	}
+
+	recs := []Rec{}
+	for _, receiver := range receivers {
+
+		if receiver == "" || receiver == "." || receiver == ".." {
+			recs = append(recs, Rec{Name: receiver, Error: "invalid receiver format", Errored: true, ID: 0})
+			continue
 		}
-		sendJSON(w, false, http.StatusInternalServerError, "db error")
-		return
+
+		var receiver_id int64
+		if err = DB.QueryRow("SELECT id FROM users WHERE username = ? ", receiver).Scan(&receiver_id); err != nil {
+			if err == sql.ErrNoRows {
+				recs = append(recs, Rec{Name: receiver, Error: "no such receiver", Errored: true, ID: 0})
+				continue
+			}
+			recs = append(recs, Rec{Name: receiver, Error: "db error", Errored: true, ID: 0})
+			continue
+		}
+		recs = append(recs, Rec{Name: receiver, Error: "", Errored: false, ID: receiver_id})
 	}
 
 	files := r.MultipartForm.File["file"]
@@ -350,22 +371,29 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	fileUUID := uuid.New().String()
 	if inputType == "link" {
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?,?,?);",
-			fileUUID,
-			sender.ID,
-			receiver_id,
-			inputType,
-			link,
-			time.Now().Format("2006-01-02 15:04:57"),
-			false,
-			false,
-		)
-		if err != nil {
-			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert (link)")
-			return
-		}
 
-		fmt.Printf("LINK SAVED: %s\n", link)
+		for i := range recs {
+			if recs[i].Errored {
+				continue
+			}
+			_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?,?,?);",
+				fileUUID,
+				sender.ID,
+				recs[i].ID,
+				inputType,
+				link,
+				time.Now().Format("2006-01-02 15:04:57"),
+				false,
+				false,
+			)
+			if err != nil {
+				recs[i].Errored = true
+				recs[i].Error = "error executing db insert (link)"
+				continue
+			}
+
+			fmt.Printf("LINK SAVED: %s\n", link)
+		}
 
 	} else if len(files) != 0 {
 
@@ -391,21 +419,28 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
-			fileUUID,
-			sender.ID,
-			receiver_id,
-			inputType,
-			filepath.Base(fileHeader.Filename),
-			fileHeader.Size,
-			time.Now().Format("2006-01-02 15:04:57"),
-			false,
-			false,
-		)
-		if err != nil {
-			fmt.Printf("DB insert failed: %v", err)
-			sendJSON(w, false, http.StatusInternalServerError, "error executing db insert (file)")
-			return
+		for i := range recs {
+			if recs[i].Errored {
+				continue
+			}
+			_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+				fileUUID,
+				sender.ID,
+				recs[i].ID,
+				inputType,
+				filepath.Base(fileHeader.Filename),
+				fileHeader.Size,
+				time.Now().Format("2006-01-02 15:04:57"),
+				false,
+				false,
+			)
+			if err != nil {
+				recs[i].Errored = true
+				recs[i].Error = "error executing db insert (file)"
+				continue
+			}
+
+			fmt.Printf("LINK SAVED: %s\n", link)
 		}
 
 		fmt.Printf("file saved")
@@ -451,13 +486,17 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 				UPDATE items
 				SET is_child = TRUE
 				WHERE uuid IN (%s)
+				AND receiver_id = ?
 			`, strings.Join(placeholders, ","))
-
-			_, err := DB.Exec(query, args...)
-			if err != nil {
-				sendJSON(w, false, http.StatusInternalServerError, fmt.Sprintf("unknown db error: %v\n", err))
-				return
+			for i := range recs {
+				_, err := DB.Exec(query, append(args, recs[i].ID)...)
+				if err != nil {
+					recs[i].Errored = true
+					recs[i].Error = fmt.Sprintf("unknown db error: %v\n", err)
+					continue
+				}
 			}
+
 		}
 
 	} else {
@@ -465,7 +504,12 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sendJSON(w, true, http.StatusOK, fileUUID)
+	type UploadResp struct {
+		UUID      string `json:"uuid"`
+		Receivers []Rec  `json:"receivers"`
+	}
+
+	sendJSON(w, true, http.StatusOK, UploadResp{UUID: fileUUID, Receivers: recs})
 }
 
 func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
