@@ -1025,16 +1025,22 @@ func cmdDeleteUser(c *Client, args []string) {
 
 func runDaemon(c *Client, _ []string) {
 
+	const wsEndpoint = "ws://localhost:7842/ws" // switch to config
+	const daemonRetrySecs = 15
+
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.Token)
 	conn, _, err := websocket.DefaultDialer.Dial(
-		"ws://localhost:7842/ws",
+		wsEndpoint,
 		headers,
 	)
-	if err != nil {
-		fmt.Println("connection failed:", err)
-		return
+	for err != nil {
+		fmt.Printf("connection failed: %v; retrying in %ds\n", err, daemonRetrySecs)
+		time.Sleep(time.Second * daemonRetrySecs)
+
+		conn, _, err = websocket.DefaultDialer.Dial(wsEndpoint, headers)
 	}
+
 	defer conn.Close()
 
 	fmt.Println("connected to server")
