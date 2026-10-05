@@ -77,3 +77,7 @@ filetransfer
 #testing sending txt files
 cmd/client/*.txt
 cmd/client/hi
+client/test
+
+server/config.json
+server/filetransfer-server

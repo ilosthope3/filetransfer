@@ -34,6 +34,9 @@ type (
 		CleanIntervalMins     int
 		DeleteGracePeriodMins int
 		ServerPort            string
+		QueryIntervalSecs     int
+		KeepAliveSecs         int
+		DBPath                string
 	}
 	APIResponse struct {
 		Success bool        `json:"success"`
@@ -65,6 +68,11 @@ type (
 	WsMessage struct {
 		MsgType int
 		Data    []byte
+	}
+	DownloadItem struct {
+		UUID   string `json:"uuid"`
+		Type   string `json:"type"`
+		Header string `json:"header,omitempty"`
 	}
 )
 
@@ -125,19 +133,71 @@ func authenticate(r *http.Request) (UserRecord, error) {
 }
 
 func mainInit() {
-
-	appConfig.MaxFormSize = 500 << 20
-	appConfig.SaveDir = "data"
-	appConfig.Password = "123"
-	appConfig.AllowCrossUserDelete = true
-	appConfig.CleanIntervalMins = 60
-	appConfig.DeleteGracePeriodMins = 1
-	appConfig.ServerPort = ":7842"
-
-	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
-		log.Fatalf("create save dir: %v", err)
+	exe, err := os.Executable()
+	if err != nil {
+		fmt.Printf("could not find executable path: %v\n", err)
+		os.Exit(1)
 	}
 
+	exeDir := filepath.Dir(exe)
+	configPath := filepath.Join(exeDir, "config.json")
+
+	defaultConfig := Config{
+		MaxFormSize:           500 << 20,
+		SaveDir:               "data",
+		DBPath:                "items.db",
+		Password:              "123",
+		AllowCrossUserDelete:  true,
+		CleanIntervalMins:     60,
+		DeleteGracePeriodMins: 1,
+		ServerPort:            ":7842",
+		QueryIntervalSecs:     5,
+		KeepAliveSecs:         30,
+	}
+
+	data, err := os.ReadFile(configPath)
+
+	if errors.Is(err, os.ErrNotExist) {
+		appConfig = defaultConfig
+
+		data, err := json.MarshalIndent(appConfig, "", "    ")
+		if err != nil {
+			fmt.Printf("could not create default config: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := os.WriteFile(configPath, data, 0o644); err != nil {
+			fmt.Printf("could not write default config: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("created default config: %s\n", configPath)
+
+	} else if err != nil {
+		fmt.Printf("could not read config %q: %v\n", configPath, err)
+		os.Exit(1)
+
+	} else if err := json.Unmarshal(data, &appConfig); err != nil {
+		fmt.Printf(
+			"invalid config %q: %v\nPlease fix the config file and restart the server.\n",
+			configPath,
+			err,
+		)
+		os.Exit(1)
+	}
+
+	if !filepath.IsAbs(appConfig.SaveDir) {
+		appConfig.SaveDir = filepath.Join(exeDir, appConfig.SaveDir)
+	}
+
+	if !filepath.IsAbs(appConfig.DBPath) {
+		appConfig.DBPath = filepath.Join(exeDir, appConfig.DBPath)
+	}
+
+	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
+		fmt.Printf("create save dir: %v\n", err)
+		os.Exit(1)
+	}
 }
 
 func cleanUpScheduler(ctx context.Context) {
@@ -787,10 +847,6 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 
 func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
-	// load this shit from config later (once you move to event handling it might change)
-	const keepAliveSecs = 30
-	const queryIntervalSecs = 5
-
 	device, err := authenticate(r)
 	if err != nil {
 		sendJSON(w, false, http.StatusUnauthorized, "Unauthorised")
@@ -806,17 +862,17 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 
 	log.Println("client connected")
 
-	conn.SetReadDeadline(time.Now().Add(2 * keepAliveSecs * time.Second))
+	conn.SetReadDeadline(time.Now().Add(2 * time.Duration(appConfig.KeepAliveSecs) * time.Second))
 
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(2 * keepAliveSecs * time.Second))
+		conn.SetReadDeadline(time.Now().Add(2 * time.Duration(appConfig.KeepAliveSecs) * time.Second))
 		return nil
 	})
 
-	tickerKeepAlive := time.NewTicker(keepAliveSecs * time.Second)
+	tickerKeepAlive := time.NewTicker(time.Duration(appConfig.KeepAliveSecs) * time.Second)
 	defer tickerKeepAlive.Stop()
 
-	tickerInbox := time.NewTicker(queryIntervalSecs * time.Second)
+	tickerInbox := time.NewTicker(time.Duration(appConfig.QueryIntervalSecs) * time.Second)
 	defer tickerInbox.Stop()
 
 	messageQueue := make(chan WsMessage)
@@ -848,10 +904,10 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-tickerInbox.C:
-				var uuids []string
+				var items []DownloadItem
 
 				rows, err := DB.Query(`
-					SELECT uuid
+					SELECT uuid, type
 					FROM items
 					WHERE receiver_id = ?
 					AND consumed = FALSE
@@ -862,35 +918,44 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 					fmt.Printf("goroutine db query error: %v\n", err)
 					continue
 				}
-				defer rows.Close()
 
 				for rows.Next() {
-					var u string
+					var item DownloadItem
 
-					if err := rows.Scan(&u); err != nil {
+					if err := rows.Scan(&item.UUID, &item.Type); err != nil {
 						fmt.Printf("goroutine db scan error: %v\n", err)
 						continue
 					}
 
-					uuids = append(uuids, u)
+					items = append(items, item)
 				}
 
 				if err := rows.Err(); err != nil {
 					fmt.Printf("goroutine db rows error: %v\n", err)
+					rows.Close()
 					continue
 				}
 
-				if len(uuids) != 0 {
+				rows.Close()
+
+				if len(items) != 0 {
+					data, err := json.Marshal(items)
+					if err != nil {
+						fmt.Printf("goroutine json marshal error: %v\n", err)
+						continue
+					}
+
 					select {
 					case messageQueue <- WsMessage{
 						MsgType: websocket.TextMessage,
-						Data:    []byte(strings.Join(uuids, " ")),
+						Data:    data,
 					}:
 						fmt.Println("alerting client of new files")
 					case <-done:
 						return
 					}
 				}
+
 			case <-done:
 				return
 			}
@@ -926,10 +991,10 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 ///////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func main() {
-	InitDB("items.db")
-	defer DB.Close()
 
 	mainInit()
+	InitDB(appConfig.DBPath)
+	defer DB.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -21,11 +21,11 @@ import (
 
 type (
 	ClientConfig struct {
-		Server              string `json:"server"`
-		TimeoutSeconds      int    `json:"timeout_seconds"`
-		SaveDir             string `json:"save_dir"`
-		AutoDownload        bool   `json:"autodownload"`
-		PollIntervalSeconds int    `json:"poll_interval_seconds"`
+		Server          string `json:"server"`
+		TimeoutSeconds  int    `json:"timeout_seconds"`
+		SaveDir         string `json:"save_dir"`
+		AutoDownload    bool   `json:"autodownload"`
+		DaemonRetrySecs int    `json:"daemon_retry_secs"`
 	}
 	UploadType string
 
@@ -48,6 +48,11 @@ type (
 	Device struct {
 		ID   int64
 		Name string
+	}
+	DownloadItem struct {
+		UUID   string
+		Type   string
+		Header string
 	}
 )
 
@@ -79,14 +84,14 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 	if data != nil {
 		b, err := json.Marshal(data)
 		if err != nil {
-			return nil, fmt.Errorf("marshal body: %w", err)
+			return nil, fmt.Errorf("(Send method) error when formatting data: %w", err)
 		}
 		reader = bytes.NewReader(b)
 	}
 
 	req, err := http.NewRequest(method, c.Config.Server+path, reader)
 	if err != nil {
-		return nil, fmt.Errorf("create request: %w", err)
+		return nil, fmt.Errorf("(Send method) error when creating request: %w", err)
 	}
 
 	if data != nil {
@@ -97,13 +102,13 @@ func (c *Client) Send(method, path string, data any) (*APIResponse, error) {
 
 	resp, err := c.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("send request: %w", err)
+		return nil, fmt.Errorf("(Send method) request error: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var out APIResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode response (HTTP %d): %w", resp.StatusCode, err)
+		return nil, fmt.Errorf("(Send method) response decode error (HTTP %d): %w", resp.StatusCode, err)
 	}
 	return &out, nil
 }
@@ -132,7 +137,7 @@ func (c *Client) SendRaw(method, path, contentType string, body io.Reader, dirFl
 	return &out, nil
 }
 
-func (c *Client) Download(uuid, path string) (string, error) {
+func (c *Client) DownloadItem(uuid, path string) (string, error) {
 
 	if err := os.MkdirAll(path, 0o755); err != nil {
 		return "", err
@@ -201,6 +206,83 @@ func (c *Client) Download(uuid, path string) (string, error) {
 	return dest, out.Close()
 }
 
+func (c *Client) DownloadItems(fileItems []DownloadItem) {
+	for _, item := range fileItems {
+		if item.Type == "link" {
+			fmt.Printf("\n  TEXT:\n    %s\n\n", item.Header)
+			resp, err := c.Send("DELETE", "delete?uuid="+item.UUID, nil)
+			if err != nil {
+				fmt.Printf("GET deleting text error (confirmation request): %v\n", err)
+			}
+			if !resp.Success {
+				fmt.Printf("GET deleting text error (server): %v\n", resp.Error)
+			}
+			continue
+		}
+		savePath, err := c.DownloadItem(item.UUID, c.Config.SaveDir)
+		if err != nil {
+			fmt.Printf("GET [%s] error: %v\n", item.UUID, err)
+			continue
+		}
+		if resp, err := c.Send("DELETE", "delete?uuid="+item.UUID, nil); err != nil {
+			fmt.Printf("GET [%s] succeeded: confirmation error: %v\n", item.UUID, err)
+			continue
+		} else if !resp.Success {
+			fmt.Printf("GET [%s] succeeded: confirmation error (server): %v\n", item.UUID, resp.Error)
+			continue
+		}
+		fmt.Printf("Downloaded Item [%s]\n", item.UUID)
+
+		if item.Type == string(UploadDirManifest) {
+			file, err := os.Open(savePath)
+			if err != nil {
+				fmt.Printf("GET opening dir manifest error: %v\n", err)
+				return
+			}
+
+			var dir Dir
+			if err := json.NewDecoder(file).Decode(&dir); err != nil {
+				fmt.Printf("GET parsing dir manifest error: %v\n", err)
+				return
+			}
+			file.Close()
+
+			var parseDirStruct func(Dir, string) error
+
+			parseDirStruct = func(curr Dir, directory string) error {
+				currSave := filepath.Join(directory, curr.DirName)
+				if err := os.MkdirAll(currSave, 0o755); err != nil {
+					return err
+				}
+				for _, uuid := range curr.Files {
+					_, err := c.DownloadItem(uuid, currSave)
+					if err != nil {
+						return err
+					}
+				}
+				for _, newDir := range curr.Dirs {
+					err := parseDirStruct(newDir, currSave)
+					if err != nil {
+						return err
+					}
+				}
+				return nil
+			}
+
+			err = parseDirStruct(dir, c.Config.SaveDir)
+			if err != nil {
+				fmt.Printf("GET saving Dir struct error: %v\n", err)
+				return
+			}
+
+			if err := os.Remove(savePath); err != nil {
+				fmt.Printf("GET removing dir manifest error: %v\n", err)
+				return
+			}
+		}
+	}
+}
+
 func (c *Client) Init() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -217,11 +299,11 @@ func (c *Client) Init() {
 	cfgPath := filepath.Join(dir, "client_config.json")
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		defaultCfg := ClientConfig{
-			Server:              "http://localhost:7842/",
-			TimeoutSeconds:      5,
-			SaveDir:             "~/Downloads/filetransfer",
-			AutoDownload:        false,
-			PollIntervalSeconds: 30,
+			Server:          "http://localhost:7842/",
+			TimeoutSeconds:  5,
+			SaveDir:         "~/Downloads/filetransfer",
+			AutoDownload:    false,
+			DaemonRetrySecs: 15,
 		}
 		err := saveConfig(defaultCfg)
 		if err != nil {
@@ -337,6 +419,64 @@ func getFiles(c *Client) ([]map[string]any, error) {
 		list = append(list, m)
 	}
 	return list, nil
+}
+
+func getDevices(c *Client) ([]Device, error) {
+	devices := []Device{}
+
+	r, err := c.Send("GET", "devices", nil)
+	if err != nil {
+		return devices, err
+	}
+	list, ok := r.Data.([]any)
+	if !ok {
+		return devices, fmt.Errorf("unexpected response shape")
+	}
+
+	for _, entry := range list {
+		dev, ok := entry.(map[string]any)
+		if !ok {
+			continue
+		}
+		id, ok := dev["id"].(float64)
+		if !ok {
+			return devices, fmt.Errorf("invalid user id")
+		}
+
+		name, ok := dev["name"].(string)
+		if !ok {
+			return devices, fmt.Errorf("invalid user name")
+		}
+		devices = append(devices, Device{ID: int64(id), Name: name})
+	}
+
+	sort.Slice(devices, func(i, j int) bool {
+		return devices[i].ID < devices[j].ID
+	})
+	return devices, nil
+}
+
+func getWhoAmI(c *Client) (int64, string, error) {
+	r, err := c.Send("GET", "whoami", nil)
+	if err != nil {
+		return 0, "", fmt.Errorf("Error when sending request: %v", err)
+	}
+
+	dev, ok := r.Data.(map[string]any)
+	if !ok {
+		return 0, "", fmt.Errorf("Error when parsing response: %v", err)
+	}
+	id, ok := dev["id"].(float64)
+	if !ok {
+		return 0, "", fmt.Errorf("Error when parsing response(id): %v", err)
+	}
+
+	name, ok := dev["name"].(string)
+	if !ok {
+		return 0, "", fmt.Errorf("Error when parsing response(name): %v", err)
+	}
+
+	return int64(id), name, nil
 }
 
 func buildUploadBody(receivers []string, filePath, link string) (*bytes.Buffer, string, error) {
@@ -457,24 +597,33 @@ func main() {
 func cmdHelp() {
 	fmt.Println(`  ./filetransfer <command> [args]
   COMMANDS:
-    auth <name> <password>     authenticate and get a token
-    whoami                     currently logged in as which user
-    devices                    list registered devices
-    inbox                      list pending files/text
-    download all|<id> [<id>]   download files/text
-    delete all|<id> [<id>]     delete files/text
-    file <receiver>:<path>     send a file
-    text <receiver>:<url>      send a link
-    dir  <reciever>:<path>     send a folder
-		daemon                     launches autodownload
-    cfg                        current config and config path
-    help                       this menu`)
+	  BASIC:
+      auth <name> <password>     authenticate and get a token +
+      whoami                     currently logged in as which user +
+      users                      list registered users +
+      cfg                        current config and config path +
+      help                       this menu
+      daemon                     launches autodownload (later)
+			deluser <id>               deletes user with that id +
+
+    INCOMING:
+      inbox                      list pending Files/Text/Dirs +
+      get all|<id> [<id>]        download Files/Text/Dirs +
+      del all|<id> [<id>]        delete Files/Text/Dirs +
+
+    OUTGOING:
+      file <path> all|<user_id> [<user_id>]    send a file
+      text "text" all|<user_id> [<user_id>]    send a link
+      dir  <path> all|<user_id> [<user_id>]    send a folder
+    
+    `)
 	fmt.Println()
 }
 
-func cmdAuth(c *Client, args []string) error {
+func cmdAuth(c *Client, args []string) {
 	if len(args) != 2 {
-		return fmt.Errorf("usage: filetransfer auth <name> <password>")
+		fmt.Println("USAGE: filetransfer auth <name> <password>")
+		return
 	}
 
 	r, err := c.Send("POST", "auth", map[string]string{
@@ -482,64 +631,32 @@ func cmdAuth(c *Client, args []string) error {
 		"Password": args[1],
 	})
 	if err != nil {
-		return fmt.Errorf("auth request: %w", err)
+		fmt.Printf("Auth request error: %v\n", err)
+		return
 	}
 
 	token, ok := r.Data.(string)
 	if !ok || token == "" {
-		return fmt.Errorf("server returned unexpected data")
+		fmt.Println("Auth request error: server returned unexpected value")
+		return
 	}
 
 	if err := saveToken(token); err != nil {
-		return fmt.Errorf("save token: %w", err)
+		fmt.Printf("Auth saving token error: %v\n", err)
+		return
 	}
 
-	return nil
-}
-
-func getDevices(c *Client) ([]Device, error) {
-	devices := []Device{}
-
-	r, err := c.Send("GET", "devices", nil)
-	if err != nil {
-		return devices, err
-	}
-	list, ok := r.Data.([]any)
-	if !ok {
-		return devices, fmt.Errorf("unexpected response shape")
-	}
-
-	for _, entry := range list {
-		dev, ok := entry.(map[string]any)
-		if !ok {
-			continue
-		}
-		id, ok := dev["id"].(float64)
-		if !ok {
-			return devices, fmt.Errorf("invalid device id")
-		}
-
-		name, ok := dev["name"].(string)
-		if !ok {
-			return devices, fmt.Errorf("invalid device name")
-		}
-		devices = append(devices, Device{ID: int64(id), Name: name})
-	}
-
-	sort.Slice(devices, func(i, j int) bool {
-		return devices[i].ID < devices[j].ID
-	})
-	return devices, nil
+	fmt.Printf("OK - Auth as user: %s\n", args[0])
 }
 
 func cmdDevices(c *Client, _ []string) {
-	fmt.Println("\n  DEVICES:")
 	devices, err := getDevices(c)
-
 	if err != nil {
-		fmt.Printf("error when fetching devices: %v\n", err)
+		fmt.Printf("Users fetching users error: %v\n", err)
 		return
 	}
+
+	fmt.Println("\n  DEVICES:")
 
 	for _, d := range devices {
 		if d.Name != c.Name {
@@ -553,15 +670,16 @@ func cmdDevices(c *Client, _ []string) {
 
 func cmdFiles(c *Client, _ []string) {
 
-	fmt.Println("\n  INBOX:")
 	list, err := getFiles(c)
 	if err != nil {
 		fmt.Printf("%v\n", err)
 		return
 	}
 
+	fmt.Println("\n  INBOX:")
+
 	if len(list) == 0 {
-		fmt.Println("Empty")
+		fmt.Println("    Empty")
 		return
 	}
 
@@ -580,40 +698,16 @@ func cmdFiles(c *Client, _ []string) {
 
 		if t, _ := row["type"].(string); t == "link" {
 			text := fmt.Sprintf("%v", row["url"])
-			fmt.Printf("    [%s] Te  %-60s  from [%s]  %s\n", id, truncate(text, 60), sender, date)
+			fmt.Printf("    [%s] Te  %-30s  from [%s]  %s\n", id, truncate(text, 60), sender, date)
 		} else if t == "file" {
 			name := fmt.Sprintf("%v", row["filename"])
-			fmt.Printf("    [%s] Fi  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
+			fmt.Printf("    [%s] Fi  %-30s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
 		} else {
 			name := strings.TrimSuffix(fmt.Sprintf("%v", row["filename"]), ".json") + "/"
-			fmt.Printf("    [%s] Di  %-60s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
+			fmt.Printf("    [%s] Di  %-30s  from [%s]  %s\n", id, truncate(name, 60), sender, date)
 		}
 	}
 	fmt.Println()
-}
-
-func getWhoAmI(c *Client) (int64, string, error) {
-	r, err := c.Send("GET", "whoami", nil)
-	if err != nil {
-		fmt.Println("error:", err)
-		os.Exit(1)
-	}
-
-	dev, ok := r.Data.(map[string]any)
-	if !ok {
-		return 0, "", fmt.Errorf("Error when parsing response")
-	}
-	id, ok := dev["id"].(float64)
-	if !ok {
-		return 0, "", fmt.Errorf("Error when parsing response(id)")
-	}
-
-	name, ok := dev["name"].(string)
-	if !ok {
-		return 0, "", fmt.Errorf("Error when parsing response(name)")
-	}
-
-	return int64(id), name, nil
 }
 
 func cmdWho(c *Client, _ []string) {
@@ -621,7 +715,7 @@ func cmdWho(c *Client, _ []string) {
 	id, name, err := getWhoAmI(c)
 
 	if err != nil {
-		fmt.Printf("error getting who am i: %v\n", err)
+		fmt.Printf("Whoami error: %v\n", err)
 		return
 	}
 
@@ -809,7 +903,7 @@ func cmdDir(c *Client, args []string) {
 
 func cmdSend(c *Client, args []string) {
 	if len(args) < 2 {
-		fmt.Println("filetransfer send <path> <receiver> [<receiver]")
+		fmt.Println("USAGE: filetransfer send <path> all|<receiver> [<receiver]")
 		os.Exit(1)
 	}
 
@@ -819,7 +913,7 @@ func cmdSend(c *Client, args []string) {
 		receivers = []string{}
 		devices, err := getDevices(c)
 		if err != nil {
-			fmt.Printf("error when fetching devices: %v\n", err)
+			fmt.Printf("SENDFILE fetching devices error: %v\n", err)
 		}
 		for _, r := range devices {
 			receivers = append(receivers, r.Name)
@@ -828,19 +922,19 @@ func cmdSend(c *Client, args []string) {
 
 	body, contentType, err := buildUploadBody(receivers, strings.TrimSpace(path), "")
 	if err != nil {
-		fmt.Println("error building body:", err)
+		fmt.Println("SENDFILE building body error:", err)
 		os.Exit(1)
 	}
 
 	resp, err := c.SendRaw("POST", "upload", contentType, body, UploadFile)
 	if err != nil {
-		fmt.Println("error uploading:", err)
+		fmt.Println("SENDFILE upload error:", err)
 		os.Exit(1)
 	}
 	if resp.Success {
 		fmt.Println("OK")
 	} else {
-		fmt.Printf("Error when sending file: %v\n", resp.Error)
+		fmt.Printf("SENDFILE upload error (server): %v\n", resp.Error)
 	}
 }
 
@@ -884,133 +978,71 @@ func cmdLink(c *Client, args []string) {
 
 func cmdDownload(c *Client, args []string) {
 	if len(args) == 0 {
-		fmt.Println("download all|<fileID> [<fileID> ...]")
+		fmt.Println("USAGE: get all|<fileID> [<fileID>]")
 		return
 	}
 
 	files, err := getFiles(c)
 	if err != nil {
-		fmt.Println("error:", err)
+		fmt.Println("GET error when fetching files:", err)
 		return
 	}
 
-	links := map[string]string{}
-	fileItems := map[string]string{}
+	fileItems := []DownloadItem{}
 	if args[0] == "all" {
 		for _, f := range files {
+			var d DownloadItem
 			if uuid, ok := f["uuid"].(string); ok {
-				if t, ok := f["type"].(string); ok {
-					fileItems[uuid] = t
-					if t == "link" {
-						if url, ok := f["url"].(string); ok {
-							links[uuid] = url
-						}
-					}
-				}
+				d.UUID = uuid
+			} else {
+				continue
 			}
+			if t, ok := f["type"].(string); ok {
+				d.Type = t
+			} else {
+				continue
+			}
+
+			if url, ok := f["url"].(string); ok {
+				d.Header = url
+			} else if fName, ok := f["filename"].(string); ok {
+				d.Header = fName
+			}
+			fileItems = append(fileItems, d)
 		}
 	} else {
 		for _, f := range files {
 			id := fmt.Sprint(f["id"])
 			if slices.Contains(args, id) {
+				var d DownloadItem
 				if uuid, ok := f["uuid"].(string); ok {
-					if t, ok := f["type"].(string); ok {
-						fileItems[uuid] = t
-						if t == "link" {
-							if url, ok := f["url"].(string); ok {
-								links[uuid] = url
-							}
-						}
-					}
+					d.UUID = uuid
+				} else {
+					continue
 				}
+				if t, ok := f["type"].(string); ok {
+					d.Type = t
+				} else {
+					continue
+				}
+
+				if url, ok := f["url"].(string); ok {
+					d.Header = url
+				} else if fName, ok := f["filename"].(string); ok {
+					d.Header = fName
+				}
+				fileItems = append(fileItems, d)
 			}
 		}
 	}
 
-	for uuid, fileType := range fileItems {
-		if fileType == "link" {
-			fmt.Printf("DISPLAYING TEXT\n%s\n\n", links[uuid])
-			resp, err := c.Send("DELETE", "delete?uuid="+uuid, nil)
-			if err != nil {
-				fmt.Printf("unexpected error when deleting text: %v\n", err)
-			}
-			if !resp.Success {
-				fmt.Printf("unexpected error when deleting text (server): %v\n", resp.Error)
-			}
-			continue
-		}
-		savePath, err := c.Download(uuid, c.Config.SaveDir)
-		if err != nil {
-			fmt.Printf("ID %s\terror: %v\n", uuid, err)
-			continue
-		}
-		if resp, err := c.Send("DELETE", "delete?uuid="+uuid, nil); err != nil {
-			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, err)
-			continue
-		} else if !resp.Success {
-			fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, resp.Error)
-			continue
-		}
-		fmt.Printf("ID %s\tOK\n", uuid)
-
-		if fileType == string(UploadDirManifest) {
-			file, err := os.Open(savePath)
-			if err != nil {
-				fmt.Printf("error opening saved file manifest %v\n", err)
-				return
-			}
-
-			var dir Dir
-			if err := json.NewDecoder(file).Decode(&dir); err != nil {
-				fmt.Printf("error parsing manifest file into var %v\n", err)
-				return
-			}
-			file.Close()
-
-			//ok jesus this logic better work
-
-			var parseDirStruct func(Dir, string) error
-
-			parseDirStruct = func(curr Dir, directory string) error {
-
-				currSave := filepath.Join(directory, curr.DirName)
-				if err := os.MkdirAll(currSave, 0o755); err != nil {
-					fmt.Printf("making dirs when downloading dir failed: %v\n", err)
-				}
-				for _, uuid := range curr.Files {
-					_, err := c.Download(uuid, currSave)
-					if err != nil {
-						return err
-					}
-				}
-				for _, newDir := range curr.Dirs {
-					err := parseDirStruct(newDir, currSave)
-					if err != nil {
-						return err
-					}
-				}
-				return nil
-			}
-
-			err = parseDirStruct(dir, c.Config.SaveDir)
-			if err != nil {
-				fmt.Printf("error when saving a dir type: %v\n", err)
-				return
-			}
-
-			if err := os.Remove(savePath); err != nil {
-				fmt.Printf("error when removing dir struct file: %v\n", err)
-				return
-			}
-
-			fmt.Println("saving dir ok !!!")
-		}
-	}
+	c.DownloadItems(fileItems)
+	fmt.Println("OK")
 }
 
 func cmdDelete(c *Client, args []string) {
 	if len(args) == 0 {
-		fmt.Println("delete all|<fileID> [<fileID> ...]")
+		fmt.Println("UASGE: del all|<fileID> [<fileID> ...]")
 		return
 	}
 
@@ -1018,7 +1050,7 @@ func cmdDelete(c *Client, args []string) {
 	if args[0] == "all" {
 		files, err := getFiles(c)
 		if err != nil {
-			fmt.Println("error:", err)
+			fmt.Println("DEL fetching files error:", err)
 			return
 		}
 		for _, f := range files {
@@ -1031,14 +1063,14 @@ func cmdDelete(c *Client, args []string) {
 	}
 	for _, id := range fileIDs {
 		if resp, err := c.Send("DELETE", "delete?id="+id, nil); err != nil {
-			fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
+			fmt.Printf("DEL item [%s] error: %v\n", id, err)
 			continue
 		} else if !resp.Success {
-			fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
+			fmt.Printf("DEL item [%s] error (server): %v\n", id, resp.Error)
 			continue
 		}
 
-		fmt.Printf("ID %s\tdeleted\n", id)
+		fmt.Printf("Deleted Item [%s]\n", id)
 	}
 
 }
@@ -1046,64 +1078,73 @@ func cmdDelete(c *Client, args []string) {
 func cmdEditCFG(c *Client, _ []string) {
 	b, err := json.MarshalIndent(c.Config, "", "  ")
 	if err != nil {
-		fmt.Println("error:", err)
+		fmt.Printf("Config json -> []byte error: %v\n", err)
 		return
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Println("failed to find home dir:", err)
-		os.Exit(1)
+		fmt.Printf("Config homedir not found error: %v\n", err)
+		return
 	}
 	path := filepath.Join(home, ".filetransfer", "client_config.json")
-	fmt.Println("\n\nCONFIG PATH:", path)
+	fmt.Println("\n  CONFIG PATH: ", path)
 	fmt.Println(string(b))
+	fmt.Println()
 }
 
 func cmdDeleteUser(c *Client, args []string) {
 	if len(args) == 0 {
-		fmt.Println("deleteUser <id>")
+		fmt.Println("USAGE: deluser <id>")
 	}
 	id := args[0]
 	if resp, err := c.Send("DELETE", "delete-user?id="+id, nil); err != nil {
-		fmt.Printf("ID %s\tdelete failed: %v\n", id, err)
+		fmt.Printf("Delete user id [%s] error: %v\n", id, err)
 		return
 	} else if !resp.Success {
-		fmt.Printf("ID %s\tdelete failed: %v\n", id, resp.Error)
+		fmt.Printf("Delete user id [%s] server error: %v\n", id, resp.Error)
 		return
 	}
 
-	fmt.Printf("ID %s\tdeleted\n", id)
+	fmt.Println("OK")
 
 }
 
 func runDaemon(c *Client, _ []string) {
-
-	const wsEndpoint = "ws://localhost:7842/ws" // switch to config
-	const daemonRetrySecs = 15
+	wsEndpoint := strings.TrimRight(c.Config.Server, "/") + "/ws"
+	wsEndpoint = strings.Replace(wsEndpoint, "http://", "ws://", 1)
+	wsEndpoint = strings.Replace(wsEndpoint, "https://", "wss://", 1)
 
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.Token)
+
 	conn, _, err := websocket.DefaultDialer.Dial(
 		wsEndpoint,
 		headers,
 	)
+
 	for err != nil {
-		fmt.Printf("connection failed: %v; retrying in %ds\n", err, daemonRetrySecs)
-		time.Sleep(time.Second * daemonRetrySecs)
+		fmt.Printf("connection failed: %v; retrying in %ds\n",
+			err, c.Config.DaemonRetrySecs)
+
+		time.Sleep(time.Second * time.Duration(c.Config.DaemonRetrySecs))
 
 		conn, _, err = websocket.DefaultDialer.Dial(wsEndpoint, headers)
 	}
 
 	defer conn.Close()
 
-	fmt.Println("connected to server")
+	fmt.Println("Connected to server")
 
 	for {
 		msgType, msg, err := conn.ReadMessage()
+
 		for err != nil {
-			fmt.Printf("connection failed: %v; retrying in %ds\n", err, daemonRetrySecs)
-			time.Sleep(time.Second * daemonRetrySecs)
+			conn.Close()
+			fmt.Printf("connection failed: %v; retrying in %ds\n",
+				err, c.Config.DaemonRetrySecs)
+
+			time.Sleep(time.Second * time.Duration(c.Config.DaemonRetrySecs))
 
 			conn, _, err = websocket.DefaultDialer.Dial(wsEndpoint, headers)
 		}
@@ -1111,22 +1152,14 @@ func runDaemon(c *Client, _ []string) {
 		fmt.Println("server:", string(msg))
 
 		if msgType == websocket.TextMessage {
-			for _, uuid := range strings.Split(string(msg), " ") {
-				_, err := c.Download(uuid, c.Config.SaveDir)
-				if err != nil {
-					fmt.Printf("ID %s\terror: %v\n", uuid, err)
-					continue
-				}
-				if resp, err := c.Send("DELETE", "delete?uuid="+uuid, nil); err != nil {
-					fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, err)
-					continue
-				} else if !resp.Success {
-					fmt.Printf("ID %s\tdownloaded, confirm failed: %v\n", uuid, resp.Error)
-					continue
-				}
-				fmt.Printf("ID %s\tOK\n", uuid)
-			}
-		}
+			var items []DownloadItem
 
+			if err := json.Unmarshal(msg, &items); err != nil {
+				fmt.Printf("error parsing server message: %v\n", err)
+				continue
+			}
+
+			c.DownloadItems(items)
+		}
 	}
 }
