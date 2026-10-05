@@ -323,13 +323,20 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	// fmt.Println(link)
 
 	var receivers []string
-	if err := json.Unmarshal([]byte(r.FormValue("receiver")), &receivers); err != nil {
+	if err := json.Unmarshal([]byte(r.FormValue("receivers")), &receivers); err != nil {
 		sendJSON(w, false, http.StatusInternalServerError, "error decoding receivers from json")
 		return
 	}
 	if len(receivers) == 0 {
 		sendJSON(w, false, http.StatusBadRequest, "Invalid receiver")
 		return
+	}
+
+	for i := range receivers {
+		if receivers[i] == sender.Name {
+			receivers = append(receivers[:i], receivers[i+1:]...)
+			break
+		}
 	}
 
 	type Rec struct {
@@ -380,9 +387,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	if inputType == "link" {
 
 		for i := range recs {
+			fmt.Println(recs[i].Name)
 			if recs[i].Errored {
 				continue
 			}
+			fmt.Println(recs[i].Name)
 			_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?,?,?);",
 				fileUUID,
 				sender.ID,
@@ -436,9 +445,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for i := range recs {
+			fmt.Println(recs[i].Name)
 			if recs[i].Errored {
 				continue
 			}
+			fmt.Println(recs[i].Name)
 
 			tx, err := DB.Begin()
 			if err != nil {
@@ -559,7 +570,7 @@ func handleDeviceNames(w http.ResponseWriter, r *http.Request) {
 	users = append(users, UserRecord{
 		ID:    device.ID,
 		Token: "",
-		Name:  fmt.Sprintf("%s  <-- current user", device.Name),
+		Name:  device.Name,
 	})
 	rows, err := DB.Query(
 		`SELECT id, username
@@ -837,25 +848,48 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 		for {
 			select {
 			case <-tickerInbox.C:
-				var inboxCounter int
-				err := DB.QueryRow(
-					`SELECT COUNT(*) FROM items WHERE receiver_id = ? AND consumed = FALSE AND NOT(type = 'dir-child')`, device.ID,
-				).Scan(&inboxCounter)
+				var uuids []string
+
+				rows, err := DB.Query(`
+					SELECT uuid
+					FROM items
+					WHERE receiver_id = ?
+					AND consumed = FALSE
+					AND NOT(type = 'dir-child' OR type = 'link')
+				`, device.ID)
 
 				if err != nil {
 					fmt.Printf("goroutine db query error: %v\n", err)
+					continue
+				}
+				defer rows.Close()
+
+				for rows.Next() {
+					var u string
+
+					if err := rows.Scan(&u); err != nil {
+						fmt.Printf("goroutine db scan error: %v\n", err)
+						continue
+					}
+
+					uuids = append(uuids, u)
 				}
 
-				if inboxCounter != 0 {
+				if err := rows.Err(); err != nil {
+					fmt.Printf("goroutine db rows error: %v\n", err)
+					continue
+				}
+
+				if len(uuids) != 0 {
 					select {
 					case messageQueue <- WsMessage{
 						MsgType: websocket.TextMessage,
-						Data:    []byte("NEW FILES"),
+						Data:    []byte(strings.Join(uuids, " ")),
 					}:
+						fmt.Println("alerting client of new files")
 					case <-done:
 						return
 					}
-
 				}
 			case <-done:
 				return
