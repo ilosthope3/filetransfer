@@ -46,7 +46,7 @@ func InitDB(path string) {
 
 	CREATE TABLE IF NOT EXISTS items (
     id             INTEGER PRIMARY KEY,
-    uuid           TEXT UNIQUE NOT NULL,
+    uuid           TEXT NOT NULL,
     sender_id      INTEGER NOT NULL REFERENCES users(id),
     receiver_id    INTEGER NOT NULL REFERENCES users(id),
     type           TEXT NOT NULL CHECK (type IN ('file', 'link', 'dir-struct', 'dir-child')),

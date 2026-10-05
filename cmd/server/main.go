@@ -170,11 +170,18 @@ func cleanUp() error {
 		}
 		cutoff := time.Now().Add(-time.Duration(appConfig.DeleteGracePeriodMins) * time.Minute)
 		rows, err := DB.Query(`
-			SELECT uuid FROM items
-			WHERE (type = 'dir-child' AND (is_child OR uploaded_at >= ?))
-				OR (NOT(type = 'dir-child') AND (consumed = FALSE OR (consumed = TRUE AND consumed_at >= ?)))
-		`, cutoff,
-			cutoff)
+			SELECT uuid
+			FROM items
+			WHERE (type = 'dir-child'
+							AND ( (consumed = TRUE AND consumed_at >= ?)
+								OR  (consumed = FALSE AND is_child = TRUE)
+								OR  (consumed = FALSE AND is_child = FALSE AND uploaded_at >= ?)
+							))
+				OR  (type != 'dir-child'
+							AND (  consumed = FALSE
+								OR   consumed_at >= ?
+							))
+		`, cutoff, cutoff, cutoff)
 		if err != nil && err != sql.ErrNoRows {
 			return 0, err
 		}
@@ -419,11 +426,40 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		var gatherUUIDs func(Dir) []string
+		gatherUUIDs = func(curr Dir) []string {
+			var r = []string{}
+			for _, d := range curr.Dirs {
+				r = append(r, gatherUUIDs(d)...)
+			}
+			return append(r, curr.Files...)
+		}
+
 		for i := range recs {
 			if recs[i].Errored {
 				continue
 			}
-			_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, filename,size, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);",
+
+			tx, err := DB.Begin()
+			if err != nil {
+				recs[i].Errored = true
+				recs[i].Error = fmt.Sprintf("error starting db transaction: %v", err)
+				continue
+			}
+
+			_, err = tx.Exec(`
+						INSERT INTO items (
+								uuid,
+								sender_id,
+								receiver_id,
+								type,
+								filename,
+								size,
+								uploaded_at,
+								consumed,
+								is_child
+						) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);
+				`,
 				fileUUID,
 				sender.ID,
 				recs[i].ID,
@@ -435,69 +471,68 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 				false,
 			)
 			if err != nil {
+				tx.Rollback()
 				recs[i].Errored = true
 				recs[i].Error = "error executing db insert (file)"
 				continue
 			}
 
-			fmt.Printf("LINK SAVED: %s\n", link)
-		}
+			if inputType == "dir-struct" {
+				file.Close()
 
-		fmt.Printf("file saved")
-
-		if inputType == "dir-struct" {
-			file.Close()
-			file, err = os.Open(filepath.Join(appConfig.SaveDir, fileUUID))
-			if err != nil {
-				sendJSON(w, false, http.StatusInternalServerError, "failed to reopen manifest")
-				return
-			}
-			defer file.Close()
-
-			var root Dir
-
-			if err := json.NewDecoder(file).Decode(&root); err != nil {
-				fmt.Printf("manifest shit failed: %v", err)
-				sendJSON(w, false, http.StatusBadRequest, "Invalid directory manifest")
-				return
-			}
-
-			uuids := []string{}
-			var gatherUUIDs func(Dir) []string
-			gatherUUIDs = func(curr Dir) []string {
-				var r = []string{}
-				for _, d := range curr.Dirs {
-					r = append(r, gatherUUIDs(d)...)
-				}
-				return append(r, curr.Files...)
-			}
-
-			uuids = append(uuids, gatherUUIDs(root)...)
-
-			args := make([]any, len(uuids))
-			placeholders := make([]string, len(uuids))
-
-			for i, uuid := range uuids {
-				placeholders[i] = "?"
-				args[i] = uuid
-			}
-
-			query := fmt.Sprintf(`
-				UPDATE items
-				SET is_child = TRUE
-				WHERE uuid IN (%s)
-				AND receiver_id = ?
-			`, strings.Join(placeholders, ","))
-			for i := range recs {
-				_, err := DB.Exec(query, append(args, recs[i].ID)...)
+				file, err = os.Open(filepath.Join(appConfig.SaveDir, fileUUID))
 				if err != nil {
+					tx.Rollback()
 					recs[i].Errored = true
-					recs[i].Error = fmt.Sprintf("unknown db error: %v\n", err)
+					recs[i].Error = "failed to reopen manifest"
+					continue
+				}
+
+				var root Dir
+				if err := json.NewDecoder(file).Decode(&root); err != nil {
+					file.Close()
+					tx.Rollback()
+					recs[i].Errored = true
+					recs[i].Error = "invalid directory manifest"
+					continue
+				}
+				file.Close()
+
+				uuids := gatherUUIDs(root)
+
+				args := make([]any, len(uuids)+1)
+				placeholders := make([]string, len(uuids))
+
+				for j, uuid := range uuids {
+					placeholders[j] = "?"
+					args[j] = uuid
+				}
+
+				args[len(uuids)] = recs[i].ID
+
+				query := fmt.Sprintf(`
+								UPDATE items
+								SET is_child = TRUE
+								WHERE uuid IN (%s)
+								AND receiver_id = ?
+						`, strings.Join(placeholders, ","))
+
+				if _, err := tx.Exec(query, args...); err != nil {
+					tx.Rollback()
+					recs[i].Errored = true
+					recs[i].Error = fmt.Sprintf("error accounting directory children: %v", err)
 					continue
 				}
 			}
 
+			if err := tx.Commit(); err != nil {
+				recs[i].Errored = true
+				recs[i].Error = fmt.Sprintf("error committing db transaction: %v", err)
+				continue
+			}
 		}
+
+		fmt.Printf("file saved")
 
 	} else {
 		sendJSON(w, false, http.StatusInternalServerError, "unknown error when saving couldnt define input type")
