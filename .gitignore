@@ -81,3 +81,7 @@ client/test
 
 server/config.json
 server/filetransfer-server
+
+server/docker-data
+
+config.json
