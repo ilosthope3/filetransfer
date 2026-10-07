@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,6 +12,7 @@ import (
 	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -306,7 +310,7 @@ func (c *Client) Init() {
 	cfgPath := filepath.Join(dir, "client_config.json")
 	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
 		defaultCfg := ClientConfig{
-			Server:          "http://localhost:7842/",
+			Server:          "https://localhost:7842/",
 			TimeoutSeconds:  5,
 			SaveDir:         "~/Downloads/silkwrap",
 			AutoDownload:    false,
@@ -339,18 +343,62 @@ func (c *Client) Init() {
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
-	c.Client = http.Client{Timeout: timeout}
 
-	if c.Token != "" {
-		_, name, err := getWhoAmI(c)
+	fingerprintPath := filepath.Join(dir, "server_fingerprint")
 
+	var fingerprint string
+
+	if _, err := os.Stat(fingerprintPath); os.IsNotExist(err) {
+		fmt.Println("No server fingerprint found")
+		fmt.Println("Connecting to server to retrieve its certificate")
+
+		var err error
+		fingerprint, err = getServerFingerprint(c.Config.Server)
 		if err != nil {
-			fmt.Printf("Error getting who am i: %v\n", err)
-			return
+			fmt.Printf("failed to get server fingerprint: %v\n", err)
+			os.Exit(1)
 		}
 
-		c.Name = name
+		fmt.Println()
+		fmt.Println("Server certificate fingerprint:")
+		fmt.Println(fingerprint)
+		fmt.Println()
+		fmt.Print("Does this fingerprint match the server? [y/N]: ")
+
+		var answer string
+		fmt.Scanln(&answer)
+
+		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			fmt.Println("server fingerprint not trusted")
+			os.Exit(1)
+		}
+
+		if err := os.WriteFile(
+			fingerprintPath,
+			[]byte(fingerprint+"\n"),
+			0o600,
+		); err != nil {
+			fmt.Printf("failed to save server fingerprint: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println("server fingerprint saved.")
+	} else {
+		tb, err := os.ReadFile(fingerprintPath)
+		if err != nil {
+			fmt.Printf("failed to read server fingerprint: %v\n", err)
+			os.Exit(1)
+		}
+
+		fingerprint = strings.TrimSpace(string(tb))
 	}
+	c.Client = http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: pinnedTLSConfig(fingerprint),
+		},
+	}
+
 }
 
 func (c *Client) loadConfig() error {
@@ -404,7 +452,69 @@ func saveToken(token string) error {
 	return os.WriteFile(path, []byte(token), 0o600)
 }
 
+func pinnedTLSConfig(expectedFingerprint string) *tls.Config {
+	return &tls.Config{
+		InsecureSkipVerify: true,
+
+		VerifyPeerCertificate: func(
+			rawCerts [][]byte,
+			verifiedChains [][]*x509.Certificate,
+		) error {
+			if len(rawCerts) == 0 {
+				return fmt.Errorf("server did not provide a certificate")
+			}
+
+			cert, err := x509.ParseCertificate(rawCerts[0])
+			if err != nil {
+				return fmt.Errorf("failed to parse server certificate: %w", err)
+			}
+
+			now := time.Now()
+			if now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+				return fmt.Errorf("server certificate is expired or not yet valid")
+			}
+
+			sum := sha256.Sum256(cert.Raw)
+			actualFingerprint := fmt.Sprintf("SHA256:%X", sum)
+
+			if actualFingerprint != expectedFingerprint {
+				return fmt.Errorf(
+					"server certificate fingerprint mismatch\nexpected: %s\nreceived: %s",
+					expectedFingerprint,
+					actualFingerprint,
+				)
+			}
+
+			return nil
+		},
+	}
+}
+
 //////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+func getServerFingerprint(serverURL string) (string, error) {
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return "", err
+	}
+
+	conn, err := tls.Dial("tcp", u.Host, &tls.Config{
+		InsecureSkipVerify: true,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer conn.Close()
+
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		return "", fmt.Errorf("server did not provide a certificate")
+	}
+
+	sum := sha256.Sum256(certs[0].Raw)
+
+	return fmt.Sprintf("SHA256:%X", sum), nil
+}
 
 func getFiles(c *Client) ([]map[string]any, error) {
 	r, err := c.Send("GET", "files", nil)
@@ -660,8 +770,8 @@ func cmdHelp() {
       users                      list registered users +
       cfg                        current config and config path +
       help                       this menu
-      daemon                     launches autodownload (later)
-			deluser <id>               deletes user with that id +
+      daemon start|stop          launches autodownload (later)
+      deluser <id>               deletes user with that id +
 
     INCOMING:
       inbox                      list pending Files/Text/Dirs +
@@ -711,8 +821,12 @@ func cmdDevices(c *Client, _ []string) error {
 
 	fmt.Println("\n  DEVICES:")
 
+	id, _, err := getWhoAmI(c)
+	if err != nil {
+		return fmt.Errorf("error fetching whoami: %w", err)
+	}
 	for _, d := range devices {
-		if d.Name != c.Name {
+		if d.ID != id {
 			fmt.Printf("    [%v] %v\n", d.ID, d.Name)
 		} else {
 			fmt.Printf("    [%v] %v <-- current user\n", d.ID, d.Name)
@@ -1219,6 +1333,7 @@ func runDaemon(c *Client) {
 		}
 	}
 }
+
 func cmdDaemon(_ *Client, args []string) error {
 
 	if len(args) == 0 {

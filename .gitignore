@@ -84,5 +84,5 @@ server/config.json
 server/silkwrap-server
 
 server/docker-data
-
+tls.*
 config.json

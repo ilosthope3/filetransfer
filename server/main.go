@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +19,12 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"crypto/rsa"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,6 +90,8 @@ var (
 			return true
 		},
 	}
+	tlsCertPath string
+	tlsKeyPath  string
 )
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -197,6 +206,103 @@ func mainInit() {
 		fmt.Printf("create save dir: %v\n", err)
 		os.Exit(1)
 	}
+
+	tlsKeyPath = filepath.Join(exeDir, "tls.key")
+	tlsCertPath = filepath.Join(exeDir, "tls.crt")
+
+	if _, err := os.Stat(tlsCertPath); errors.Is(err, os.ErrNotExist) {
+		key, err := rsa.GenerateKey(rand.Reader, 4096)
+		if err != nil {
+			fmt.Printf("could not generate TLS key: %v\n", err)
+			os.Exit(1)
+		}
+
+		serial, err := rand.Int(
+			rand.Reader,
+			new(big.Int).Lsh(big.NewInt(1), 128),
+		)
+		if err != nil {
+			fmt.Printf("could not generate TLS certificate serial: %v\n", err)
+			os.Exit(1)
+		}
+
+		template := x509.Certificate{
+			SerialNumber: serial,
+
+			Subject: pkix.Name{
+				CommonName: "Silkwrap Server",
+			},
+
+			NotBefore: time.Now(),
+			NotAfter:  time.Now().AddDate(10, 0, 0),
+
+			KeyUsage: x509.KeyUsageDigitalSignature |
+				x509.KeyUsageKeyEncipherment,
+
+			ExtKeyUsage: []x509.ExtKeyUsage{
+				x509.ExtKeyUsageServerAuth,
+			},
+
+			BasicConstraintsValid: true,
+		}
+
+		certDER, err := x509.CreateCertificate(
+			rand.Reader,
+			&template,
+			&template,
+			&key.PublicKey,
+			key,
+		)
+		if err != nil {
+			fmt.Printf("could not create TLS certificate: %v\n", err)
+			os.Exit(1)
+		}
+
+		keyPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "RSA PRIVATE KEY",
+			Bytes: x509.MarshalPKCS1PrivateKey(key),
+		})
+
+		certPEM := pem.EncodeToMemory(&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: certDER,
+		})
+
+		if err := os.WriteFile(tlsKeyPath, keyPEM, 0o600); err != nil {
+			fmt.Printf("could not write TLS key: %v\n", err)
+			os.Exit(1)
+		}
+
+		if err := os.WriteFile(tlsCertPath, certPEM, 0o644); err != nil {
+			fmt.Printf("could not write TLS certificate: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Printf("created TLS certificate: %s\n", tlsKeyPath)
+		fmt.Printf("created TLS key: %s\n", tlsKeyPath)
+	}
+
+	certPEM, err := os.ReadFile(tlsCertPath)
+	if err != nil {
+		fmt.Printf("could not read TLS certificate: %v\n", err)
+		os.Exit(1)
+	}
+
+	block, _ := pem.Decode(certPEM)
+	if block == nil {
+		fmt.Println("could not decode TLS certificate")
+		os.Exit(1)
+	}
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		fmt.Printf("could not parse TLS certificate: %v\n", err)
+		os.Exit(1)
+	}
+
+	fingerprint := sha256.Sum256(cert.Raw)
+
+	fmt.Printf("TLS certificate fingerprint:\nSHA256:%X\n", fingerprint)
 }
 
 func cleanUpScheduler(ctx context.Context) {
@@ -1001,7 +1107,7 @@ func main() {
 		server.Shutdown(context.Background())
 	}()
 
-	err := server.ListenAndServe()
+	err := server.ListenAndServeTLS(tlsCertPath, tlsKeyPath)
 	if err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
