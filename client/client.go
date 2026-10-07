@@ -3,17 +3,21 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -61,6 +65,8 @@ const (
 	UploadFile        UploadType = "file"
 	UploadDirChild    UploadType = "dir-child"
 	UploadDirManifest UploadType = "dir-struct"
+
+	AppDir = ".filetransfer"
 )
 
 func (a APIResponse) String() string {
@@ -206,7 +212,7 @@ func (c *Client) DownloadItem(uuid, path string) (string, error) {
 	return dest, out.Close()
 }
 
-func (c *Client) DownloadItems(fileItems []DownloadItem) {
+func (c *Client) DownloadItems(fileItems []DownloadItem) error {
 	for _, item := range fileItems {
 		if item.Type == "link" {
 			fmt.Printf("\n  TEXT:\n    %s\n\n", item.Header)
@@ -231,19 +237,18 @@ func (c *Client) DownloadItems(fileItems []DownloadItem) {
 			fmt.Printf("GET [%s] succeeded: confirmation error (server): %v\n", item.UUID, resp.Error)
 			continue
 		}
-		fmt.Printf("Downloaded Item [%s]\n", item.UUID)
 
 		if item.Type == string(UploadDirManifest) {
 			file, err := os.Open(savePath)
 			if err != nil {
 				fmt.Printf("GET opening dir manifest error: %v\n", err)
-				return
+				continue
 			}
 
 			var dir Dir
 			if err := json.NewDecoder(file).Decode(&dir); err != nil {
 				fmt.Printf("GET parsing dir manifest error: %v\n", err)
-				return
+				continue
 			}
 			file.Close()
 
@@ -271,16 +276,18 @@ func (c *Client) DownloadItems(fileItems []DownloadItem) {
 
 			err = parseDirStruct(dir, c.Config.SaveDir)
 			if err != nil {
-				fmt.Printf("GET saving Dir struct error: %v\n", err)
-				return
+				return fmt.Errorf("GET saving Dir struct error: %v\n", err)
+
 			}
 
 			if err := os.Remove(savePath); err != nil {
-				fmt.Printf("GET removing dir manifest error: %v\n", err)
-				return
+				return fmt.Errorf("GET removing dir manifest error: %v\n", err)
+
 			}
 		}
+		fmt.Printf("OK %s\n", item.UUID)
 	}
+	return nil
 }
 
 func (c *Client) Init() {
@@ -289,7 +296,7 @@ func (c *Client) Init() {
 		fmt.Println("failed to find home dir:", err)
 		os.Exit(1)
 	}
-	dir := filepath.Join(home, ".filetransfer")
+	dir := filepath.Join(home, AppDir)
 
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		fmt.Println("failed to create app dir:", err)
@@ -338,7 +345,7 @@ func (c *Client) Init() {
 		_, name, err := getWhoAmI(c)
 
 		if err != nil {
-			fmt.Printf("error getting who am i: %v\n", err)
+			fmt.Printf("Error getting who am i: %v\n", err)
 			return
 		}
 
@@ -352,7 +359,7 @@ func (c *Client) loadConfig() error {
 		fmt.Println("failed to find home dir:", err)
 		os.Exit(1)
 	}
-	cfgPath := filepath.Join(home, ".filetransfer", "client_config.json")
+	cfgPath := filepath.Join(home, AppDir, "client_config.json")
 
 	b, err := os.ReadFile(cfgPath)
 	if err != nil {
@@ -383,7 +390,7 @@ func saveConfig(cfg ClientConfig) error {
 	if err != nil {
 		return err
 	}
-	path := filepath.Join(home, ".filetransfer", "client_config.json")
+	path := filepath.Join(home, AppDir, "client_config.json")
 	b, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return err
@@ -393,7 +400,7 @@ func saveConfig(cfg ClientConfig) error {
 
 func saveToken(token string) error {
 	home, _ := os.UserHomeDir()
-	path := filepath.Join(home, ".filetransfer", "token")
+	path := filepath.Join(home, AppDir, "token")
 	return os.WriteFile(path, []byte(token), 0o600)
 }
 
@@ -407,7 +414,7 @@ func getFiles(c *Client) ([]map[string]any, error) {
 	// fmt.Println(r)
 	listAny, ok := r.Data.([]any)
 	if !ok {
-		return nil, errors.New("unexpected file type")
+		return nil, fmt.Errorf("unexpected file type")
 	}
 
 	var list []map[string]any
@@ -506,6 +513,7 @@ func buildUploadBody(receivers []string, filePath, link string) (*bytes.Buffer, 
 	recData, err := json.Marshal(receivers)
 	if err != nil {
 		fmt.Printf("error encoding receivers into json: %v\n", err)
+		return nil, "", err
 	}
 
 	w.WriteField("receivers", string(recData))
@@ -564,33 +572,82 @@ func main() {
 
 	switch strings.ToLower(cmd) {
 	case "auth":
-		cmdAuth(&c, args)
-	case "devices":
-		cmdDevices(&c, args)
+		if err := cmdAuth(&c, args); err != nil {
+			fmt.Println(err)
+		}
+	case "users":
+		if err := cmdDevices(&c, args); err != nil {
+			fmt.Println(err)
+		}
 	case "inbox":
-		cmdFiles(&c, args)
+		if err := cmdFiles(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "file":
-		cmdSend(&c, args)
+		if err := cmdSend(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "text":
-		cmdLink(&c, args)
+		if err := cmdLink(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "whoami":
-		cmdWho(&c, args)
+		if err := cmdWho(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "get":
-		cmdDownload(&c, args)
+		if err := cmdDownload(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "cfg":
-		cmdEditCFG(&c, args)
+		if err := cmdEditCFG(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "del":
-		cmdDelete(&c, args)
+		if err := cmdDelete(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "deluser":
-		cmdDeleteUser(&c, args)
+		if err := cmdDeleteUser(&c, args); err != nil {
+			fmt.Println(err)
+		}
 	case "dir":
-		cmdDir(&c, args)
+		if err := cmdDir(&c, args); err != nil {
+			fmt.Println(err)
+		}
+
 	case "daemon":
-		runDaemon(&c, args)
+		if err := cmdDaemon(&c, args); err != nil {
+			fmt.Println(err)
+		} else {
+			fmt.Println("OK")
+		}
+	case "__daemon":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			fmt.Printf("error when accessing homedir %v\n", err)
+			return
+		}
+		pid := os.Getpid()
+		path := filepath.Join(home, AppDir, "daemon.pid")
+		if err := os.WriteFile(path, []byte(strconv.Itoa(pid)), 0o644); err != nil {
+			log.Printf("error writing to pid file: %v", err)
+		}
+		defer os.Remove(path)
+		runDaemon(&c)
+	case "help":
+		cmdHelp()
+
 	default:
 		fmt.Printf("Unknown command: %s\n\n", cmd)
 		cmdHelp()
-		os.Exit(1)
 	}
 }
 
@@ -620,10 +677,9 @@ func cmdHelp() {
 	fmt.Println()
 }
 
-func cmdAuth(c *Client, args []string) {
+func cmdAuth(c *Client, args []string) error {
 	if len(args) != 2 {
-		fmt.Println("USAGE: filetransfer auth <name> <password>")
-		return
+		return fmt.Errorf("USAGE: filetransfer auth <name> <password>")
 	}
 
 	r, err := c.Send("POST", "auth", map[string]string{
@@ -631,29 +687,26 @@ func cmdAuth(c *Client, args []string) {
 		"Password": args[1],
 	})
 	if err != nil {
-		fmt.Printf("Auth request error: %v\n", err)
-		return
+		return fmt.Errorf("Auth request error: %w\n", err)
 	}
 
 	token, ok := r.Data.(string)
 	if !ok || token == "" {
-		fmt.Println("Auth request error: server returned unexpected value")
-		return
+		return fmt.Errorf("Auth request error: server returned unexpected value")
 	}
 
 	if err := saveToken(token); err != nil {
-		fmt.Printf("Auth saving token error: %v\n", err)
-		return
+		return fmt.Errorf("Auth saving token error: %v\n", err)
 	}
 
-	fmt.Printf("OK - Auth as user: %s\n", args[0])
+	fmt.Println("OK")
+	return nil
 }
 
-func cmdDevices(c *Client, _ []string) {
+func cmdDevices(c *Client, _ []string) error {
 	devices, err := getDevices(c)
 	if err != nil {
-		fmt.Printf("Users fetching users error: %v\n", err)
-		return
+		return fmt.Errorf("Users fetching users error: %w\n", err)
 	}
 
 	fmt.Println("\n  DEVICES:")
@@ -666,21 +719,21 @@ func cmdDevices(c *Client, _ []string) {
 		}
 	}
 	fmt.Println()
+	return nil
 }
 
-func cmdFiles(c *Client, _ []string) {
+func cmdFiles(c *Client, _ []string) error {
 
 	list, err := getFiles(c)
 	if err != nil {
-		fmt.Printf("%v\n", err)
-		return
+		return fmt.Errorf("Files fetching error%v\n", err)
 	}
 
 	fmt.Println("\n  INBOX:")
 
 	if len(list) == 0 {
 		fmt.Println("    Empty")
-		return
+		return nil
 	}
 
 	truncate := func(s string, n int) string {
@@ -708,26 +761,23 @@ func cmdFiles(c *Client, _ []string) {
 		}
 	}
 	fmt.Println()
+	return nil
 }
 
-func cmdWho(c *Client, _ []string) {
-
+func cmdWho(c *Client, _ []string) error {
 	id, name, err := getWhoAmI(c)
-
 	if err != nil {
-		fmt.Printf("Whoami error: %v\n", err)
-		return
+		return fmt.Errorf("Whoami error: %v\n", err)
 	}
 
 	fmt.Printf("\n  Logged in as [%v] - %v\n\n", id, name)
-
+	return nil
 }
 
-func cmdDir(c *Client, args []string) {
+func cmdDir(c *Client, args []string) error {
 
 	if len(args) < 2 {
-		fmt.Println("filetransfer dir <path> <receiver> [<receiver]")
-		os.Exit(1)
+		return fmt.Errorf("filetransfer dir <path> <receiver> [<receiver]")
 	}
 
 	path := args[0]
@@ -745,16 +795,13 @@ func cmdDir(c *Client, args []string) {
 
 	f, err := os.Stat(path)
 	if os.IsNotExist(err) {
-		fmt.Println("no such path found")
-		os.Exit(1)
+		return fmt.Errorf("no such path found")
 	} else if err != nil {
-		fmt.Printf("unkown error when os.Stat: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("unkown error when os.Stat: %v\n", err)
 	}
 
 	if !f.IsDir() {
-		fmt.Println("path is a file: use file command")
-		os.Exit(1)
+		return fmt.Errorf("path is a file: use file command")
 	}
 
 	type Rec struct {
@@ -843,21 +890,17 @@ func cmdDir(c *Client, args []string) {
 	}
 
 	if len(validReceivers) == 0 {
-		fmt.Println("no valid receivers when sending dir")
-		return
+		return fmt.Errorf("no valid receivers when sending dir")
 	}
 
 	body, contentType, err := buildDirManifestBody(validReceivers, root)
 	if err != nil {
-		fmt.Printf("error building manifest: %v\n", err)
-		return
+		return fmt.Errorf("error building manifest: %w\n", err)
 	}
 
 	for key, val := range receiverMap {
 		if !val {
-			fmt.Printf("file sending error for %v\n", key)
-		} else {
-			fmt.Printf("%v files sent ok, now manifest\n", key)
+			fmt.Printf("Error sending for: %v\n", key)
 		}
 	}
 
@@ -870,41 +913,40 @@ func cmdDir(c *Client, args []string) {
 	)
 
 	if err != nil {
-		fmt.Printf("error when sending %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error when sending %w\n", err)
 	}
 	if !resp.Success {
-		fmt.Printf("error server: %v\n", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("error server: %v\n", resp.Error)
 	}
 
 	var result UploadResult
 
 	data, err := json.Marshal(resp.Data)
 	if err != nil {
-		fmt.Printf("error encoding response data: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error encoding response data: %w\n", err)
 	}
 
 	if err := json.Unmarshal(data, &result); err != nil {
-		fmt.Printf("error decoding upload response: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("error decoding upload response: %w\n", err)
 	}
 
 	for _, r := range result.Receivers {
 		if r.Errored {
 			fmt.Printf("manifest sending error for %v: %v\n", r.Name, r.Error)
-		} else {
-			fmt.Printf("%v manifest sent ok\n", r.Name)
 		}
 	}
 
+	for _, r := range result.Receivers {
+		if !r.Errored {
+			fmt.Printf("%v OK\n", r.Name)
+		}
+	}
+	return nil
 }
 
-func cmdSend(c *Client, args []string) {
+func cmdSend(c *Client, args []string) error {
 	if len(args) < 2 {
-		fmt.Println("USAGE: filetransfer send <path> all|<receiver> [<receiver]")
-		os.Exit(1)
+		return fmt.Errorf("USAGE: filetransfer send <path> all|<receiver> [<receiver]")
 	}
 
 	path := args[0]
@@ -913,7 +955,7 @@ func cmdSend(c *Client, args []string) {
 		receivers = []string{}
 		devices, err := getDevices(c)
 		if err != nil {
-			fmt.Printf("SENDFILE fetching devices error: %v\n", err)
+			return fmt.Errorf("SENDFILE fetching devices error: %w\n", err)
 		}
 		for _, r := range devices {
 			receivers = append(receivers, r.Name)
@@ -922,27 +964,25 @@ func cmdSend(c *Client, args []string) {
 
 	body, contentType, err := buildUploadBody(receivers, strings.TrimSpace(path), "")
 	if err != nil {
-		fmt.Println("SENDFILE building body error:", err)
-		os.Exit(1)
+		return fmt.Errorf("SENDFILE building body error: %w", err)
 	}
 
 	resp, err := c.SendRaw("POST", "upload", contentType, body, UploadFile)
 	if err != nil {
-		fmt.Println("SENDFILE upload error:", err)
-		os.Exit(1)
+		return fmt.Errorf("SENDFILE upload error: %w", err)
 	}
 	if resp.Success {
 		fmt.Println("OK")
+		return nil
 	} else {
-		fmt.Printf("SENDFILE upload error (server): %v\n", resp.Error)
+		return fmt.Errorf("SENDFILE upload error (server): %v\n", resp.Error)
 	}
 }
 
-func cmdLink(c *Client, args []string) {
+func cmdLink(c *Client, args []string) error {
 
 	if len(args) < 2 {
-		fmt.Println(`filetransfer link "<url>" <receiver> [<receiver]`)
-		os.Exit(1)
+		return fmt.Errorf(`filetransfer link "<url>" <receiver> [<receiver]`)
 	}
 
 	url := args[0]
@@ -951,7 +991,7 @@ func cmdLink(c *Client, args []string) {
 		receivers = []string{}
 		devices, err := getDevices(c)
 		if err != nil {
-			fmt.Printf("error when fetching devices: %v\n", err)
+			return fmt.Errorf("error when fetching devices: %v\n", err)
 		}
 		for _, r := range devices {
 			receivers = append(receivers, r.Name)
@@ -960,32 +1000,29 @@ func cmdLink(c *Client, args []string) {
 
 	body, contentType, err := buildUploadBody(receivers, "", url)
 	if err != nil {
-		fmt.Println("error building body:", err)
-		os.Exit(1)
+		return fmt.Errorf("error building body: %w", err)
 	}
 
 	resp, err := c.SendRaw("POST", "upload", contentType, body, UploadLink)
 	if err != nil {
-		fmt.Println("error uploading:", err)
-		os.Exit(1)
+		return fmt.Errorf("error uploading: %w", err)
 	}
 	if resp.Success {
 		fmt.Println("OK")
+		return nil
 	} else {
-		fmt.Printf("Error when sending text: %v\n", resp.Error)
+		return fmt.Errorf("Error when sending text: %v\n", resp.Error)
 	}
 }
 
-func cmdDownload(c *Client, args []string) {
+func cmdDownload(c *Client, args []string) error {
 	if len(args) == 0 {
-		fmt.Println("USAGE: get all|<fileID> [<fileID>]")
-		return
+		return fmt.Errorf("USAGE: get all|<fileID> [<fileID>]")
 	}
 
 	files, err := getFiles(c)
 	if err != nil {
-		fmt.Println("GET error when fetching files:", err)
-		return
+		return fmt.Errorf("GET error when fetching files: %w", err)
 	}
 
 	fileItems := []DownloadItem{}
@@ -1036,22 +1073,23 @@ func cmdDownload(c *Client, args []string) {
 		}
 	}
 
-	c.DownloadItems(fileItems)
+	if err := c.DownloadItems(fileItems); err != nil {
+		return fmt.Errorf("error downloading %w", err)
+	}
 	fmt.Println("OK")
+	return nil
 }
 
-func cmdDelete(c *Client, args []string) {
+func cmdDelete(c *Client, args []string) error {
 	if len(args) == 0 {
-		fmt.Println("UASGE: del all|<fileID> [<fileID> ...]")
-		return
+		return fmt.Errorf("USAGE: del all|<fileID> [<fileID> ...]")
 	}
 
 	var fileIDs []string
 	if args[0] == "all" {
 		files, err := getFiles(c)
 		if err != nil {
-			fmt.Println("DEL fetching files error:", err)
-			return
+			return fmt.Errorf("DEL fetching files error: %w", err)
 		}
 		for _, f := range files {
 			if id, ok := f["id"].(string); ok {
@@ -1070,47 +1108,50 @@ func cmdDelete(c *Client, args []string) {
 			continue
 		}
 
-		fmt.Printf("Deleted Item [%s]\n", id)
+		fmt.Printf("OK\n")
 	}
-
+	return nil
 }
 
-func cmdEditCFG(c *Client, _ []string) {
+func cmdEditCFG(c *Client, _ []string) error {
 	b, err := json.MarshalIndent(c.Config, "", "  ")
 	if err != nil {
-		fmt.Printf("Config json -> []byte error: %v\n", err)
-		return
+		return fmt.Errorf("Config json -> []byte error: %v\n", err)
 	}
 
 	home, err := os.UserHomeDir()
 	if err != nil {
-		fmt.Printf("Config homedir not found error: %v\n", err)
-		return
+		return fmt.Errorf("Config homedir not found error: %v\n", err)
+
 	}
-	path := filepath.Join(home, ".filetransfer", "client_config.json")
+	path := filepath.Join(home, AppDir, "client_config.json")
 	fmt.Println("\n  CONFIG PATH: ", path)
 	fmt.Println(string(b))
 	fmt.Println()
+	return nil
 }
 
-func cmdDeleteUser(c *Client, args []string) {
+func cmdDeleteUser(c *Client, args []string) error {
 	if len(args) == 0 {
-		fmt.Println("USAGE: deluser <id>")
+		return fmt.Errorf("USAGE: deluser <id>")
+
 	}
 	id := args[0]
 	if resp, err := c.Send("DELETE", "delete-user?id="+id, nil); err != nil {
-		fmt.Printf("Delete user id [%s] error: %v\n", id, err)
-		return
+		return fmt.Errorf("Delete user id [%s] error: %v\n", id, err)
 	} else if !resp.Success {
-		fmt.Printf("Delete user id [%s] server error: %v\n", id, resp.Error)
-		return
+		return fmt.Errorf("Delete user id [%s] server error: %v\n", id, resp.Error)
 	}
 
 	fmt.Println("OK")
-
+	return nil
 }
 
-func runDaemon(c *Client, _ []string) {
+func runDaemon(c *Client) {
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGTERM, os.Interrupt)
+	defer signal.Stop(stop)
+
 	wsEndpoint := strings.TrimRight(c.Config.Server, "/") + "/ws"
 	wsEndpoint = strings.Replace(wsEndpoint, "http://", "ws://", 1)
 	wsEndpoint = strings.Replace(wsEndpoint, "https://", "wss://", 1)
@@ -1118,48 +1159,153 @@ func runDaemon(c *Client, _ []string) {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.Token)
 
-	conn, _, err := websocket.DefaultDialer.Dial(
-		wsEndpoint,
-		headers,
-	)
-
-	for err != nil {
-		fmt.Printf("connection failed: %v; retrying in %ds\n",
-			err, c.Config.DaemonRetrySecs)
-
-		time.Sleep(time.Second * time.Duration(c.Config.DaemonRetrySecs))
-
-		conn, _, err = websocket.DefaultDialer.Dial(wsEndpoint, headers)
-	}
-
-	defer conn.Close()
-
-	fmt.Println("Connected to server")
-
 	for {
-		msgType, msg, err := conn.ReadMessage()
+		conn, _, err := websocket.DefaultDialer.Dial(wsEndpoint, headers)
 
-		for err != nil {
-			conn.Close()
-			fmt.Printf("connection failed: %v; retrying in %ds\n",
+		if err != nil {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+
+			log.Printf("connection failed: %v; retrying in %ds\n",
 				err, c.Config.DaemonRetrySecs)
 
 			time.Sleep(time.Second * time.Duration(c.Config.DaemonRetrySecs))
-
-			conn, _, err = websocket.DefaultDialer.Dial(wsEndpoint, headers)
+			continue
 		}
 
-		fmt.Println("server:", string(msg))
+		log.Println("Connected to server")
 
-		if msgType == websocket.TextMessage {
-			var items []DownloadItem
+		dead := make(chan struct{})
 
-			if err := json.Unmarshal(msg, &items); err != nil {
-				fmt.Printf("error parsing server message: %v\n", err)
-				continue
+		go func() {
+			defer close(dead)
+
+			for {
+				msgType, msg, err := conn.ReadMessage()
+				if err != nil {
+					return
+				}
+
+				if msgType != websocket.TextMessage {
+					continue
+				}
+
+				var items []DownloadItem
+
+				if err := json.Unmarshal(msg, &items); err != nil {
+					log.Printf("error parsing server message: %v\n", err)
+					continue
+				}
+
+				c.DownloadItems(items)
 			}
+		}()
 
-			c.DownloadItems(items)
+		select {
+		case <-stop:
+			conn.Close()
+			return
+
+		case <-dead:
+			conn.Close()
+
+			fmt.Printf("connection lost; retrying in %ds\n",
+				c.Config.DaemonRetrySecs)
+
+			time.Sleep(time.Second * time.Duration(c.Config.DaemonRetrySecs))
 		}
 	}
+}
+func cmdDaemon(_ *Client, args []string) error {
+
+	if len(args) == 0 {
+		return fmt.Errorf("USAGE daemon start|stop")
+	}
+
+	if _, ok := map[string]struct{}{"start": {}, "stop": {}}[args[0]]; !ok {
+		return fmt.Errorf("USAGE daemon start|stop")
+	}
+
+	daemonState := func(path string) (string, error) {
+		//empty return assume daemon is off
+		_, err := os.Stat(path)
+		if os.IsNotExist(err) {
+			return "", nil //no file = not started
+		}
+		if err != nil {
+			return "", fmt.Errorf("unexpected error when statting directory: %w", err)
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return "", fmt.Errorf("error opening pid file: %w", err)
+		}
+
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			return "", fmt.Errorf("error converting pid to int (idek how this could happen atp): %w", err)
+		}
+
+		process, err := os.FindProcess(pid)
+		if err != nil {
+			return "", nil
+		}
+
+		if err := process.Signal(syscall.Signal(0)); err != nil {
+			return "", nil
+		}
+
+		return strconv.Itoa(pid), nil
+	} // type shi
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed getting homedir")
+	}
+
+	pid, err := daemonState(filepath.Join(home, AppDir, "daemon.pid"))
+	if err != nil {
+		return fmt.Errorf("error fetching pid for daemon: %w", err)
+	}
+
+	if args[0] == "start" && pid != "" {
+		return fmt.Errorf("Process already up")
+	} else if args[0] == "stop" && pid == "" {
+		return fmt.Errorf("Process already dead")
+	} else if args[0] == "stop" {
+		if pid == "" {
+			return fmt.Errorf("daemon is not running")
+		}
+
+		pidInt, err := strconv.Atoi(pid)
+		if err != nil {
+			return fmt.Errorf("invalid daemon pid: %w", err)
+		}
+
+		process, err := os.FindProcess(pidInt)
+		if err != nil {
+			return fmt.Errorf("failed to find daemon process: %w", err)
+		}
+
+		if err := process.Signal(syscall.SIGTERM); err != nil {
+			return fmt.Errorf("failed to stop daemon: %w", err)
+		}
+		return nil
+	}
+
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	cmd := exec.Command(exe, "__daemon")
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start daemon: %w", err)
+	}
+
+	return nil
 }

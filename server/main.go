@@ -124,8 +124,7 @@ func authenticate(r *http.Request) (UserRecord, error) {
 		if err == sql.ErrNoRows {
 			return row, errors.New("invalid token")
 		}
-		fmt.Printf("random err in auth func: %v\n", err)
-		return row, errors.New("db error during euth service")
+		return row, errors.New("db error during auth service")
 
 	}
 	return row, nil
@@ -203,21 +202,21 @@ func mainInit() {
 func cleanUpScheduler(ctx context.Context) {
 	err := cleanUp()
 	if err != nil {
-		fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
+		log.Printf("Cleanup error (startup): %v", err)
 	}
 	t := time.NewTicker(time.Duration(appConfig.CleanIntervalMins) * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println("done daemon")
+			log.Println("Cleanup scheduler goroutine done")
 			return
 		case <-t.C:
 			err := cleanUp()
 			if err != nil {
-				fmt.Printf("idk ill cahnge to logs later and figure it out, %v", err)
+				log.Printf("Cleanup error %v", err)
 			}
-			fmt.Println("called")
+			log.Println("Cleanup complete")
 		}
 	}
 }
@@ -276,7 +275,6 @@ func cleanUp() error {
 			}
 			p := filepath.Join(appConfig.SaveDir, e.Name())
 			if err := os.Remove(p); err != nil {
-				fmt.Printf("orphan remove %s: %v\n", p, err)
 				continue
 			}
 			removed++
@@ -294,20 +292,17 @@ func cleanUp() error {
 
 	orphans, err := removeOrphanBlobs()
 	if err != nil {
-		fmt.Println("orphan sweep:", err)
 		return err
 	}
 
 	n, _ := r.RowsAffected()
-	fmt.Printf("cleanup: rows=%d orphans=%d\n", n, orphans)
+	log.Printf("Cleanup: rows=%d orphans=%d\n", n, orphans)
 	return nil
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("whoami")
-
 	sender, err := authenticate(r)
 	if err != nil {
 		sendJSON(w, false, http.StatusUnauthorized, "Unauthorized")
@@ -320,7 +315,6 @@ func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 func handleLogin(w http.ResponseWriter, r *http.Request) {
 	var req struct{ Password, Name string }
 	var row struct{ Username, Token string }
-	fmt.Println("handling lgoin")
 
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
@@ -374,14 +368,11 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 
 	err = r.ParseMultipartForm(appConfig.MaxFormSize)
 	if err != nil {
-		fmt.Printf("form parse error %v\n", err)
 		sendJSON(w, false, http.StatusBadRequest, "Files too large")
 		return
 	}
 
 	link := r.FormValue("text")
-	// fmt.Println(link)
-
 	var receivers []string
 	if err := json.Unmarshal([]byte(r.FormValue("receivers")), &receivers); err != nil {
 		sendJSON(w, false, http.StatusInternalServerError, "error decoding receivers from json")
@@ -447,11 +438,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 	if inputType == "link" {
 
 		for i := range recs {
-			fmt.Println(recs[i].Name)
 			if recs[i].Errored {
 				continue
 			}
-			fmt.Println(recs[i].Name)
 			_, err = DB.Exec("INSERT INTO items (uuid, sender_id, receiver_id, type, url, uploaded_at, consumed, is_child) VALUES (?, ?, ?, ?, ?, ?,?,?);",
 				fileUUID,
 				sender.ID,
@@ -468,7 +457,7 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 
-			fmt.Printf("LINK SAVED: %s\n", link)
+			log.Printf("LINK SAVED: %s\n", link)
 		}
 
 	} else if len(files) != 0 {
@@ -505,11 +494,9 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 		}
 
 		for i := range recs {
-			fmt.Println(recs[i].Name)
 			if recs[i].Errored {
 				continue
 			}
-			fmt.Println(recs[i].Name)
 
 			tx, err := DB.Begin()
 			if err != nil {
@@ -602,9 +589,6 @@ func handleUpload(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 		}
-
-		fmt.Printf("file saved")
-
 	} else {
 		sendJSON(w, false, http.StatusInternalServerError, "unknown error when saving couldnt define input type")
 		return
@@ -740,7 +724,6 @@ func handleDelete(w http.ResponseWriter, r *http.Request) {
 		)
 	}
 	if err != nil {
-		fmt.Println("delete update failed:", err)
 		sendJSON(w, false, http.StatusInternalServerError, "db update failed")
 		return
 	}
@@ -771,7 +754,6 @@ func handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	res, err := DB.Exec(`DELETE FROM users WHERE id = ?`, id)
 
 	if err != nil {
-		fmt.Println("delete update failed:", err)
 		sendJSON(w, false, http.StatusInternalServerError, "deleting user failed")
 		return
 	}
@@ -815,7 +797,6 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 			sendJSON(w, false, http.StatusBadRequest, "no such id found")
 			return
 		}
-		fmt.Printf("err123456: %v\n", err)
 		sendJSON(w, false, http.StatusInternalServerError, "db error idgaf")
 		return
 	}
@@ -842,7 +823,6 @@ func handleDownload(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", `attachment; filename="`+safe+`"`)
 	w.Header().Set("Content-Type", "application/octet-stream")
 	http.ServeContent(w, r, filenameDeref, time.Now(), file)
-	fmt.Printf("File %s downloaded for %s\n", filenameDeref, device.Name)
 }
 
 func handleWebsocket(w http.ResponseWriter, r *http.Request) {
@@ -915,7 +895,7 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				`, device.ID)
 
 				if err != nil {
-					fmt.Printf("goroutine db query error: %v\n", err)
+					log.Printf("goroutine db query error: %v\n", err)
 					continue
 				}
 
@@ -923,7 +903,7 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 					var item DownloadItem
 
 					if err := rows.Scan(&item.UUID, &item.Type); err != nil {
-						fmt.Printf("goroutine db scan error: %v\n", err)
+						log.Printf("goroutine db scan error: %v\n", err)
 						continue
 					}
 
@@ -931,7 +911,7 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				}
 
 				if err := rows.Err(); err != nil {
-					fmt.Printf("goroutine db rows error: %v\n", err)
+					log.Printf("goroutine db rows error: %v\n", err)
 					rows.Close()
 					continue
 				}
@@ -941,7 +921,7 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 				if len(items) != 0 {
 					data, err := json.Marshal(items)
 					if err != nil {
-						fmt.Printf("goroutine json marshal error: %v\n", err)
+						log.Printf("goroutine json marshal error: %v\n", err)
 						continue
 					}
 
@@ -967,7 +947,7 @@ func handleWebsocket(w http.ResponseWriter, r *http.Request) {
 			select {
 			case msg := <-messageQueue:
 				if err := conn.WriteMessage(msg.MsgType, msg.Data); err != nil {
-					fmt.Printf("sending goroutine errored: %v\n", err)
+					log.Printf("sending goroutine errored: %v\n", err)
 					return
 				}
 
@@ -1017,7 +997,7 @@ func main() {
 	go func() {
 		<-ctx.Done()
 
-		fmt.Println("shutting down server...")
+		log.Println("SHUTTING DOWN")
 		server.Shutdown(context.Background())
 	}()
 
