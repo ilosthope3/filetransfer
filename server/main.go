@@ -3,14 +3,20 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -18,13 +24,8 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
-
-	"crypto/rsa"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
-	"math/big"
 	"time"
 
 	"github.com/google/uuid"
@@ -81,6 +82,10 @@ type (
 		Type   string `json:"type"`
 		Header string `json:"header,omitempty"`
 	}
+	AuthLimiter struct {
+		mu       sync.Mutex
+		attempts map[string][]time.Time
+	}
 )
 
 var (
@@ -92,7 +97,37 @@ var (
 	}
 	tlsCertPath string
 	tlsKeyPath  string
+
+	authLimiter = AuthLimiter{
+		attempts: make(map[string][]time.Time),
+	}
 )
+
+func (l *AuthLimiter) Allow(ip string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	now := time.Now()
+	cutoff := now.Add(-time.Minute)
+
+	times := l.attempts[ip]
+
+	var recent []time.Time
+
+	for _, t := range times {
+		if t.After(cutoff) {
+			recent = append(recent, t)
+		}
+	}
+
+	if len(recent) >= 5 {
+		l.attempts[ip] = recent
+		return false
+	}
+
+	l.attempts[ip] = append(recent, now)
+	return true
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -277,7 +312,7 @@ func mainInit() {
 			os.Exit(1)
 		}
 
-		fmt.Printf("created TLS certificate: %s\n", tlsKeyPath)
+		fmt.Printf("created TLS certificate: %s\n", tlsCertPath)
 		fmt.Printf("created TLS key: %s\n", tlsKeyPath)
 	}
 
@@ -418,10 +453,22 @@ func handleWhoAmI(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleLogin(w http.ResponseWriter, r *http.Request) {
+
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		http.Error(w, "bad address", http.StatusBadRequest)
+		return
+	}
+
+	if !authLimiter.Allow(ip) {
+		http.Error(w, "too many attempts", http.StatusTooManyRequests)
+		return
+	}
+
 	var req struct{ Password, Name string }
 	var row struct{ Username, Token string }
 
-	err := json.NewDecoder(r.Body).Decode(&req)
+	err = json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
 		sendJSON(w, false, http.StatusBadRequest, "Invalid JSON")
 		return
