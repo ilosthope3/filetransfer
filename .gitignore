@@ -73,14 +73,15 @@ data/tokens.json
 #why u tryna look at that
 TODO.txt
 #binary
-filetransfer
+sw
+
 #testing sending txt files
 cmd/client/*.txt
 cmd/client/hi
 client/test
 
 server/config.json
-server/filetransfer-server
+server/silkwrap-server
 
 server/docker-data
 

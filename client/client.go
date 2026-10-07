@@ -66,7 +66,7 @@ const (
 	UploadDirChild    UploadType = "dir-child"
 	UploadDirManifest UploadType = "dir-struct"
 
-	AppDir = ".filetransfer"
+	AppDir = ".silkwrap"
 )
 
 func (a APIResponse) String() string {
@@ -308,7 +308,7 @@ func (c *Client) Init() {
 		defaultCfg := ClientConfig{
 			Server:          "http://localhost:7842/",
 			TimeoutSeconds:  5,
-			SaveDir:         "~/Downloads/filetransfer",
+			SaveDir:         "~/Downloads/silkwrap",
 			AutoDownload:    false,
 			DaemonRetrySecs: 15,
 		}
@@ -652,7 +652,7 @@ func main() {
 }
 
 func cmdHelp() {
-	fmt.Println(`  ./filetransfer <command> [args]
+	fmt.Println(`  sw <command> [args]
   COMMANDS:
 	  BASIC:
       auth <name> <password>     authenticate and get a token +
@@ -679,7 +679,7 @@ func cmdHelp() {
 
 func cmdAuth(c *Client, args []string) error {
 	if len(args) != 2 {
-		return fmt.Errorf("USAGE: filetransfer auth <name> <password>")
+		return fmt.Errorf("USAGE: sw auth <name> <password>")
 	}
 
 	r, err := c.Send("POST", "auth", map[string]string{
@@ -777,7 +777,7 @@ func cmdWho(c *Client, _ []string) error {
 func cmdDir(c *Client, args []string) error {
 
 	if len(args) < 2 {
-		return fmt.Errorf("filetransfer dir <path> <receiver> [<receiver]")
+		return fmt.Errorf("sw dir <path> <receiver> [<receiver]")
 	}
 
 	path := args[0]
@@ -946,7 +946,7 @@ func cmdDir(c *Client, args []string) error {
 
 func cmdSend(c *Client, args []string) error {
 	if len(args) < 2 {
-		return fmt.Errorf("USAGE: filetransfer send <path> all|<receiver> [<receiver]")
+		return fmt.Errorf("USAGE: sw send <path> all|<receiver> [<receiver]")
 	}
 
 	path := args[0]
@@ -982,7 +982,7 @@ func cmdSend(c *Client, args []string) error {
 func cmdLink(c *Client, args []string) error {
 
 	if len(args) < 2 {
-		return fmt.Errorf(`filetransfer link "<url>" <receiver> [<receiver]`)
+		return fmt.Errorf(`sw link "<url>" <receiver> [<receiver]`)
 	}
 
 	url := args[0]

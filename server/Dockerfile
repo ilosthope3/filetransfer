@@ -7,12 +7,12 @@ RUN go mod download
 
 COPY . .
 
-RUN go build -o filetransfer-server ./server
+RUN go build -o silkwrap-server ./server
 
 FROM debian:bookworm-slim
 
 WORKDIR /app
 
-COPY --from=builder /app/filetransfer-server .
+COPY --from=builder /app/silkwrap-server .
 
-CMD ["./filetransfer-server"]
+CMD ["./silkwrap-server"]

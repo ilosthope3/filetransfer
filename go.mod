@@ -1,4 +1,4 @@
-module github.com/ilosthope3/filetransfer
+module github.com/ilosthope3/silkwrap
 
 go 1.26.5
 
