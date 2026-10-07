@@ -141,14 +141,13 @@ func authenticate(r *http.Request) (UserRecord, error) {
 }
 
 func mainInit() {
-	exe, err := os.Executable()
+	stateDir, err := os.Getwd()
 	if err != nil {
-		fmt.Printf("could not find executable path: %v\n", err)
+		fmt.Printf("could not find working directory: %v\n", err)
 		os.Exit(1)
 	}
 
-	exeDir := filepath.Dir(exe)
-	configPath := filepath.Join(exeDir, "config.json")
+	configPath := filepath.Join(stateDir, "config.json")
 
 	defaultConfig := Config{
 		MaxFormSize:           500 << 20,
@@ -195,11 +194,11 @@ func mainInit() {
 	}
 
 	if !filepath.IsAbs(appConfig.SaveDir) {
-		appConfig.SaveDir = filepath.Join(exeDir, appConfig.SaveDir)
+		appConfig.SaveDir = filepath.Join(stateDir, appConfig.SaveDir)
 	}
 
 	if !filepath.IsAbs(appConfig.DBPath) {
-		appConfig.DBPath = filepath.Join(exeDir, appConfig.DBPath)
+		appConfig.DBPath = filepath.Join(stateDir, appConfig.DBPath)
 	}
 
 	if err := os.MkdirAll(appConfig.SaveDir, 0o755); err != nil {
@@ -207,8 +206,8 @@ func mainInit() {
 		os.Exit(1)
 	}
 
-	tlsKeyPath = filepath.Join(exeDir, "tls.key")
-	tlsCertPath = filepath.Join(exeDir, "tls.crt")
+	tlsKeyPath = filepath.Join(stateDir, "tls.key")
+	tlsCertPath = filepath.Join(stateDir, "tls.crt")
 
 	if _, err := os.Stat(tlsCertPath); errors.Is(err, os.ErrNotExist) {
 		key, err := rsa.GenerateKey(rand.Reader, 4096)
